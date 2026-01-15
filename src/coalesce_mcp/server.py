@@ -229,8 +229,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f'{{"error": "Unknown tool: {name}"}}')]
 
 
-async def main():
-    """Run the MCP server."""
+async def async_main():
+    """Run the MCP server (async)."""
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
@@ -238,7 +238,11 @@ async def main():
             server.create_initialization_options(),
         )
 
+def main(): 
+    """Entry point for console script"""
+    import asyncio
+    asyncio.run(async_main())
+
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
