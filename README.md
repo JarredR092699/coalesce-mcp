@@ -40,38 +40,19 @@ uv tool install coalesce-mcp
 
 ### Configure Claude Desktop
 
-#### macOS
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "coalesce": {
-      "command": "coalesce-mcp",
-      "env": {
-        "COALESCE_API_TOKEN": "your-api-token-here",
-        "COALESCE_BASE_URL": "https://app.coalescesoftware.io/api"
-      }
-    }
-  }
-}
-```
-
-#### Windows
-
-Edit `%APPDATA%\Claude\claude_desktop_config.json` with the same configuration as above.
-
 #### Using uvx (Recommended)
 
-uvx provides isolated environments and is the recommended way to run MCP servers:
+uvx provides isolated environments and is the recommended way to run MCP servers.
+
+**macOS:** Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** Edit `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "coalesce": {
       "command": "uvx",
-      "args": ["coalesce-mcp"],
+      "args": ["--from", "coalesce-mcp", "coalesce-mcp-server"],
       "env": {
         "COALESCE_API_TOKEN": "your-api-token-here",
         "COALESCE_BASE_URL": "https://app.coalescesoftware.io/api"
@@ -81,11 +62,41 @@ uvx provides isolated environments and is the recommended way to run MCP servers
 }
 ```
 
-**Why uvx?**
-- Isolated environment per tool
-- No global pip pollution
-- Automatic updates available
-- Works consistently across platforms
+#### Using uv tool install
+
+First install the tool:
+```bash
+uv tool install coalesce-mcp
+```
+
+Then configure Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "coalesce": {
+      "command": "coalesce-mcp-server",
+      "env": {
+        "COALESCE_API_TOKEN": "your-api-token-here",
+        "COALESCE_BASE_URL": "https://app.coalescesoftware.io/api"
+      }
+    }
+  }
+}
+```
+
+#### Using pip/pipx
+
+First install globally:
+```bash
+# Using pip
+pip install coalesce-mcp
+
+# Or using pipx (isolated)
+pipx install coalesce-mcp
+```
+
+Then use the same configuration as "uv tool install" above
 
 ### Restart Claude Desktop
 
