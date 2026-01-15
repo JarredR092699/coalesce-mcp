@@ -62,7 +62,9 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Edit `%APPDATA%\Claude\claude_desktop_config.json` with the same configuration as above.
 
-#### If using uv
+#### Using uvx (Recommended)
+
+uvx provides isolated environments and is the recommended way to run MCP servers:
 
 ```json
 {
@@ -78,6 +80,12 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json` with the same configuration a
   }
 }
 ```
+
+**Why uvx?**
+- Isolated environment per tool
+- No global pip pollution
+- Automatic updates available
+- Works consistently across platforms
 
 ### Restart Claude Desktop
 
@@ -194,6 +202,35 @@ Claude will use the appropriate tools to answer your questions and provide detai
 
 ## Troubleshooting
 
+### Known Issues
+
+**Version 0.1.2 is broken.** If you installed version 0.1.2, you'll see `ModuleNotFoundError: No module named 'coalesce_mcp'`. Upgrade to version 0.1.3 or later:
+
+```bash
+# Using uvx (recommended)
+uvx coalesce-mcp@latest
+
+# Using pip
+pip install --upgrade coalesce-mcp
+
+# Using uv tool
+uv tool upgrade coalesce-mcp
+```
+
+### Verify Installation
+
+After installation, verify it's working correctly:
+
+```bash
+# Check version (should be 0.1.3 or later)
+python -c "import coalesce_mcp; print(coalesce_mcp.__version__)"
+
+# Verify command exists
+coalesce-mcp-server --help
+```
+
+If the import fails, you may have the broken 0.1.2 version - upgrade using the commands above.
+
 ### MCP Server Not Detected
 
 1. Verify the configuration path is correct for your OS
@@ -209,13 +246,16 @@ Claude will use the appropriate tools to answer your questions and provide detai
 
 ### Command Not Found
 
-If `coalesce-mcp` command is not found:
+If `coalesce-mcp-server` command is not found:
 
 ```bash
+# Using uvx (recommended)
+uvx coalesce-mcp
+
 # Using pip
 pip install --force-reinstall coalesce-mcp
 
-# Using uv
+# Using uv tool
 uv tool install --force coalesce-mcp
 ```
 
@@ -241,7 +281,7 @@ MIT License - see LICENSE file for details
 
 ## Support
 
-- **Issues:** https://github.com/yourusername/coalesce-mcp/issues
+- **Issues:** https://github.com/JarredR092699/coalesce-mcp/issues
 - **Coalesce API Docs:** https://docs.coalesce.io/docs/api
 
 ## Credits
