@@ -181,6 +181,137 @@ class CoalesceClient:
 
         return response.json()
 
+    # =========================================================================
+    # Node Management Endpoints
+    # =========================================================================
+
+    async def list_environment_nodes(self, environment_id: str) -> dict[str, Any]:
+        """
+        List all deployed nodes in an environment.
+
+        Endpoint: GET /api/v1/environments/{environmentID}/nodes
+
+        Args:
+            environment_id: The environment ID to list nodes from
+
+        Returns:
+            Dict with array of node objects
+        """
+        client = await self._get_client()
+        response = await client.get(f"/api/v1/environments/{environment_id}/nodes")
+        response.raise_for_status()
+        return response.json()
+
+    async def list_workspace_nodes(self, workspace_id: str) -> dict[str, Any]:
+        """
+        List all development nodes in a workspace.
+
+        Endpoint: GET /api/v1/workspaces/{workspaceID}/nodes
+
+        Args:
+            workspace_id: The workspace ID to list nodes from
+
+        Returns:
+            Dict with array of node objects
+        """
+        client = await self._get_client()
+        response = await client.get(f"/api/v1/workspaces/{workspace_id}/nodes")
+        response.raise_for_status()
+        return response.json()
+
+    async def get_workspace_node(self, workspace_id: str, node_id: str) -> dict[str, Any]:
+        """
+        Get complete details for a specific workspace node.
+
+        Endpoint: GET /api/v1/workspaces/{workspaceID}/nodes/{nodeID}
+
+        Args:
+            workspace_id: The workspace ID containing the node
+            node_id: The node ID to retrieve
+
+        Returns:
+            Complete node object with metadata
+        """
+        client = await self._get_client()
+        response = await client.get(f"/api/v1/workspaces/{workspace_id}/nodes/{node_id}")
+        response.raise_for_status()
+        return response.json()
+
+    async def get_environment_node(self, environment_id: str, node_id: str) -> dict[str, Any]:
+        """
+        Get complete details for a specific environment node.
+
+        Endpoint: GET /api/v1/environments/{environmentID}/nodes/{nodeID}
+
+        Args:
+            environment_id: The environment ID containing the node
+            node_id: The node ID to retrieve
+
+        Returns:
+            Complete node object with metadata
+        """
+        client = await self._get_client()
+        response = await client.get(f"/api/v1/environments/{environment_id}/nodes/{node_id}")
+        response.raise_for_status()
+        return response.json()
+
+    async def create_workspace_node(
+        self,
+        workspace_id: str,
+        node_type: str,
+        predecessor_node_ids: list[str]
+    ) -> dict[str, Any]:
+        """
+        Create a new node in a workspace with default settings.
+
+        Endpoint: POST /api/v1/workspaces/{workspaceID}/nodes
+
+        Args:
+            workspace_id: The workspace ID to create the node in
+            node_type: Node type (e.g., 'Stage', 'Fact', 'Dimension', or custom nodeTypeID)
+            predecessor_node_ids: Array of predecessor node IDs (use [] for source nodes)
+
+        Returns:
+            Created node object with generated ID
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"/api/v1/workspaces/{workspace_id}/nodes",
+            json={
+                "nodeType": node_type,
+                "predecessorNodeIDs": predecessor_node_ids,
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def set_node(
+        self,
+        workspace_id: str,
+        node_id: str,
+        node_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Update (full replacement) an existing node.
+
+        Endpoint: PUT /api/v1/workspaces/{workspaceID}/nodes/{nodeID}
+
+        Args:
+            workspace_id: The workspace ID containing the node
+            node_id: The node ID to update
+            node_data: Complete node object with all required fields
+
+        Returns:
+            Updated node object
+        """
+        client = await self._get_client()
+        response = await client.put(
+            f"/api/v1/workspaces/{workspace_id}/nodes/{node_id}",
+            json=node_data
+        )
+        response.raise_for_status()
+        return response.json()
+
 
 # Global client instance
 _client: CoalesceClient | None = None
@@ -442,3 +573,236 @@ async def list_failed_runs(
         limit=limit,
         starting_from=starting_from,
     )
+
+
+# =============================================================================
+# Node Management MCP Tool Functions
+# =============================================================================
+
+async def list_environment_nodes_tool(environment_id: str) -> str:
+    """
+    List all deployed nodes in an environment.
+
+    Use this tool to:
+    - View all nodes deployed to a production environment
+    - Audit deployed transformations
+    - Compare environment configurations
+    - Check what's currently in production
+
+    Args:
+        environment_id: The environment ID to list nodes from
+
+    Returns:
+        JSON array of node objects with IDs, names, types, and metadata
+    """
+    client = get_client()
+    try:
+        result = await client.list_environment_nodes(environment_id)
+        return json.dumps(result, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to list environment nodes: {e.response.status_code}",
+            "environment_id": environment_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def list_workspace_nodes_tool(workspace_id: str) -> str:
+    """
+    List all development nodes in a workspace.
+
+    Use this tool to:
+    - View all transformations in development
+    - Audit workspace structure
+    - Inventory data pipeline nodes
+    - Find specific nodes by browsing
+
+    Args:
+        workspace_id: The workspace ID to list nodes from
+
+    Returns:
+        JSON array of node objects with IDs, names, types, and metadata
+    """
+    client = get_client()
+    try:
+        result = await client.list_workspace_nodes(workspace_id)
+        return json.dumps(result, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to list workspace nodes: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def get_workspace_node_tool(workspace_id: str, node_id: str) -> str:
+    """
+    Get complete details for a specific workspace node.
+
+    Use this tool to:
+    - View full node configuration and SQL
+    - Understand a transformation's logic
+    - Get metadata for a specific node
+    - Inspect node properties before updating
+
+    Args:
+        workspace_id: The workspace ID containing the node
+        node_id: The node ID to retrieve
+
+    Returns:
+        JSON object with complete node details including SQL, metadata, and configuration
+    """
+    client = get_client()
+    try:
+        result = await client.get_workspace_node(workspace_id, node_id)
+        return json.dumps(result, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to get workspace node: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "node_id": node_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def get_environment_node_tool(environment_id: str, node_id: str) -> str:
+    """
+    Get complete details for a specific environment node.
+
+    Use this tool to:
+    - View deployed node configuration
+    - Check production transformation logic
+    - Compare environment vs workspace versions
+    - Audit deployed nodes
+
+    Args:
+        environment_id: The environment ID containing the node
+        node_id: The node ID to retrieve
+
+    Returns:
+        JSON object with complete node details including SQL, metadata, and configuration
+    """
+    client = get_client()
+    try:
+        result = await client.get_environment_node(environment_id, node_id)
+        return json.dumps(result, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to get environment node: {e.response.status_code}",
+            "environment_id": environment_id,
+            "node_id": node_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def create_workspace_node_tool(
+    workspace_id: str,
+    node_type: str,
+    predecessor_node_ids: list[str] | None = None
+) -> str:
+    """
+    Create a new node in a workspace with default settings.
+
+    Use this tool to:
+    - Programmatically create new transformations
+    - Build pipeline nodes via code
+    - Initialize nodes with workspace defaults
+
+    NOTE: Creates node with defaults. Use set_node to configure further.
+
+    Args:
+        workspace_id: The workspace ID to create the node in
+        node_type: Node type: 'Stage', 'Fact', 'Dimension', or custom nodeTypeID
+        predecessor_node_ids: Array of predecessor node IDs. Use [] for source nodes.
+
+    Returns:
+        JSON object with created node including generated ID
+    """
+    client = get_client()
+
+    # Default to empty array if not provided
+    if predecessor_node_ids is None:
+        predecessor_node_ids = []
+
+    try:
+        result = await client.create_workspace_node(workspace_id, node_type, predecessor_node_ids)
+        return json.dumps(result, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to create workspace node: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "node_type": node_type,
+            "predecessor_node_ids": predecessor_node_ids,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def set_node_tool(
+    workspace_id: str,
+    node_id: str,
+    node_config_json: str
+) -> str:
+    """
+    Update (full replacement) an existing node.
+
+    IMPORTANT: This performs a COMPLETE REPLACEMENT of the node.
+    Recommended workflow:
+    1. Call get_workspace_node to fetch current config
+    2. Modify the returned JSON
+    3. Pass the complete modified config to this tool
+
+    Use this tool to:
+    - Update node configuration
+    - Modify SQL or transformation logic
+    - Change node properties
+    - Update metadata
+
+    Args:
+        workspace_id: The workspace ID containing the node
+        node_id: The node ID to update
+        node_config_json: Complete node object as JSON string (must include all required fields)
+
+    Returns:
+        JSON object with updated node
+    """
+    client = get_client()
+
+    # Parse and validate JSON
+    try:
+        node_data = json.loads(node_config_json)
+    except json.JSONDecodeError as e:
+        return json.dumps({
+            "error": "Invalid JSON in node_config_json parameter",
+            "details": str(e),
+        }, indent=2)
+
+    # Validate required fields
+    required_fields = ["id", "name", "locationName", "nodeType", "metadata"]
+    missing_fields = [field for field in required_fields if field not in node_data]
+    if missing_fields:
+        return json.dumps({
+            "error": "Missing required fields in node configuration",
+            "missing_fields": missing_fields,
+            "required_fields": required_fields,
+        }, indent=2)
+
+    # Validate ID consistency
+    if node_data.get("id") != node_id:
+        return json.dumps({
+            "error": "Node ID mismatch",
+            "node_id_parameter": node_id,
+            "node_id_in_config": node_data.get("id"),
+            "details": "The 'id' field in the node config must match the node_id parameter",
+        }, indent=2)
+
+    # Call API
+    try:
+        result = await client.set_node(workspace_id, node_id, node_data)
+        return json.dumps(result, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to update node: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "node_id": node_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)

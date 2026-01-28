@@ -1,7 +1,8 @@
 """Coalesce MCP Server implementation.
 
-Provides tools for interacting with Coalesce job runs API.
-All operations are READ-ONLY.
+Provides tools for interacting with Coalesce API:
+- Job runs (read-only)
+- Node management (read and write)
 """
 
 from mcp.server import Server
@@ -15,6 +16,12 @@ from coalesce_mcp.client import (
     get_run_results,
     get_job_details,
     list_failed_runs,
+    list_environment_nodes_tool,
+    list_workspace_nodes_tool,
+    get_workspace_node_tool,
+    get_environment_node_tool,
+    create_workspace_node_tool,
+    set_node_tool,
 )
 
 # Create MCP server instance
@@ -173,6 +180,169 @@ Returns run info, status, results, and extracted error details.""",
                 "required": ["run_id"],
             },
         ),
+        Tool(
+            name="list_environment_nodes",
+            description="""List all deployed nodes in an environment.
+
+Use this tool to:
+- View all nodes deployed to a production environment
+- Audit deployed transformations
+- Compare environment configurations
+- Check what's currently in production
+
+Returns array of node objects with IDs, names, types, and metadata.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "environment_id": {
+                        "type": "string",
+                        "description": "The environment ID to list nodes from",
+                    },
+                },
+                "required": ["environment_id"],
+            },
+        ),
+        Tool(
+            name="list_workspace_nodes",
+            description="""List all development nodes in a workspace.
+
+Use this tool to:
+- View all transformations in development
+- Audit workspace structure
+- Inventory data pipeline nodes
+- Find specific nodes by browsing
+
+Returns array of node objects with IDs, names, types, and metadata.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "The workspace ID to list nodes from",
+                    },
+                },
+                "required": ["workspace_id"],
+            },
+        ),
+        Tool(
+            name="get_workspace_node",
+            description="""Get complete details for a specific workspace node.
+
+Use this tool to:
+- View full node configuration and SQL
+- Understand a transformation's logic
+- Get metadata for a specific node
+- Inspect node properties before updating
+
+Returns complete node object including SQL, metadata, and configuration.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "The workspace ID containing the node",
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "The node ID to retrieve",
+                    },
+                },
+                "required": ["workspace_id", "node_id"],
+            },
+        ),
+        Tool(
+            name="get_environment_node",
+            description="""Get complete details for a specific environment node.
+
+Use this tool to:
+- View deployed node configuration
+- Check production transformation logic
+- Compare environment vs workspace versions
+- Audit deployed nodes
+
+Returns complete node object including SQL, metadata, and configuration.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "environment_id": {
+                        "type": "string",
+                        "description": "The environment ID containing the node",
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "The node ID to retrieve",
+                    },
+                },
+                "required": ["environment_id", "node_id"],
+            },
+        ),
+        Tool(
+            name="create_workspace_node",
+            description="""Create a new node in a workspace with default settings.
+
+Use this tool to:
+- Programmatically create new transformations
+- Build pipeline nodes via code
+- Initialize nodes with workspace defaults
+
+NOTE: Creates node with defaults. Use set_node to configure further.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "The workspace ID to create the node in",
+                    },
+                    "node_type": {
+                        "type": "string",
+                        "description": "Node type: 'Stage', 'Fact', 'Dimension', or custom nodeTypeID",
+                    },
+                    "predecessor_node_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of predecessor node IDs. Use [] for source nodes.",
+                        "default": [],
+                    },
+                },
+                "required": ["workspace_id", "node_type"],
+            },
+        ),
+        Tool(
+            name="set_node",
+            description="""Update (full replacement) an existing node.
+
+IMPORTANT: This performs a COMPLETE REPLACEMENT of the node.
+Recommended workflow:
+1. Call get_workspace_node to fetch current config
+2. Modify the returned JSON
+3. Pass the complete modified config to this tool
+
+Use this tool to:
+- Update node configuration
+- Modify SQL or transformation logic
+- Change node properties
+- Update metadata
+
+Returns updated node object.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "The workspace ID containing the node",
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "The node ID to update",
+                    },
+                    "node_config_json": {
+                        "type": "string",
+                        "description": "Complete node object as JSON string (must include all required fields: id, name, locationName, nodeType, metadata)",
+                    },
+                },
+                "required": ["workspace_id", "node_id", "node_config_json"],
+            },
+        ),
     ]
 
 
@@ -223,6 +393,54 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not run_id:
             return [TextContent(type="text", text='{"error": "run_id is required"}')]
         result = await get_job_details(run_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "list_environment_nodes":
+        environment_id = arguments.get("environment_id")
+        if not environment_id:
+            return [TextContent(type="text", text='{"error": "environment_id is required"}')]
+        result = await list_environment_nodes_tool(environment_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "list_workspace_nodes":
+        workspace_id = arguments.get("workspace_id")
+        if not workspace_id:
+            return [TextContent(type="text", text='{"error": "workspace_id is required"}')]
+        result = await list_workspace_nodes_tool(workspace_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "get_workspace_node":
+        workspace_id = arguments.get("workspace_id")
+        node_id = arguments.get("node_id")
+        if not workspace_id or not node_id:
+            return [TextContent(type="text", text='{"error": "workspace_id and node_id are required"}')]
+        result = await get_workspace_node_tool(workspace_id, node_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "get_environment_node":
+        environment_id = arguments.get("environment_id")
+        node_id = arguments.get("node_id")
+        if not environment_id or not node_id:
+            return [TextContent(type="text", text='{"error": "environment_id and node_id are required"}')]
+        result = await get_environment_node_tool(environment_id, node_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "create_workspace_node":
+        workspace_id = arguments.get("workspace_id")
+        node_type = arguments.get("node_type")
+        if not workspace_id or not node_type:
+            return [TextContent(type="text", text='{"error": "workspace_id and node_type are required"}')]
+        predecessor_node_ids = arguments.get("predecessor_node_ids")
+        result = await create_workspace_node_tool(workspace_id, node_type, predecessor_node_ids)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "set_node":
+        workspace_id = arguments.get("workspace_id")
+        node_id = arguments.get("node_id")
+        node_config_json = arguments.get("node_config_json")
+        if not workspace_id or not node_id or not node_config_json:
+            return [TextContent(type="text", text='{"error": "workspace_id, node_id, and node_config_json are required"}')]
+        result = await set_node_tool(workspace_id, node_id, node_config_json)
         return [TextContent(type="text", text=result)]
 
     else:
