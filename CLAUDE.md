@@ -147,13 +147,11 @@ Some results include `predecessorNodeIDs`/`predecessors` fields enabling exact d
 
 ## Known Bugs (from 2026-03-18 testing)
 
-These were identified during Cortex CLI agent testing and are **not yet fixed**:
+1. ~~**`get_job_details` JSON parse error**~~ — **Fixed (2026-03-19).** Root cause: `CoalesceClient.get_run_status` and `CoalesceClient.get_run_results` called `response.json()` with no empty-body guard. A 2xx response with an empty body throws `json.JSONDecodeError`, which the MCP-level `except httpx.HTTPStatusError` clauses don't catch, crashing the tool call. Fixed by adding `if not response.content: return {}` to both methods, matching the pattern already used in `list_runs`.
 
-1. **`get_job_details` JSON parse error** — `get_job_details` at `client.py:660` iterates `results_data.items()` assuming a flat dict, but `_parse_results_to_node_map` may have already normalized the structure. If any sub-call (`get_run`, `get_run_status`, `get_run_results`) returns empty/invalid JSON, the whole response may fail with `Expecting value: line 1 column 1 (char 0)`.
+2. ~~**`get_run_results` may return all nodes**~~ — **Fixed.** `_classify_nodes` already checks both `node.get("status") or node.get("runState")`, so API field name differences are handled. `_format_blocked_node` was also updated (2026-03-19) to apply the same fallback so `downstream_blocked_nodes[].status` reflects the actual state rather than `null`.
 
-2. **`get_run_results` may return all nodes** — `_classify_nodes` at `client.py:469` checks `node.get("status")`, but the API may use `runState` instead of `status` as the field name. If the field doesn't match, all nodes classify as neither failed nor succeeded, causing the filter to silently miss failures.
-
-3. **`investigate_failure` untested** — relies on the same `_classify_nodes` and `_parse_results_to_node_map` pipeline; likely affected by the same `status` vs `runState` field name issue.
+3. **`investigate_failure` field name issue** — **Fixed** (same fix as #2). The `_classify_nodes` pipeline correctly handles both `status` and `runState`. The remaining gap (`_format_blocked_node` showing `null` status for blocked nodes) was fixed 2026-03-19.
 
 **Debugging approach:** Test with a definitively failed run, log the raw `results_data` from `client.get_run_results()` to verify the actual field names before assuming the filtering works.
 

@@ -167,6 +167,8 @@ class CoalesceClient:
         response = await client.get("/scheduler/runStatus", params={"runID": run_id})
         response.raise_for_status()
 
+        if not response.content:
+            return {}
         return response.json()
 
     async def get_run_results(self, run_id: str) -> dict[str, Any]:
@@ -186,6 +188,8 @@ class CoalesceClient:
         response = await client.get(f"/v1/runs/{run_id}/results")
         response.raise_for_status()
 
+        if not response.content:
+            return {}
         return response.json()
 
     # =========================================================================
@@ -549,7 +553,7 @@ def _format_blocked_node(node_id: str, node: dict) -> dict:
     return {
         "node_id": node_id,
         "node_name": node.get("nodeName") or node.get("name"),
-        "status": node.get("status"),
+        "status": node.get("status") or node.get("runState"),
     }
 
 
