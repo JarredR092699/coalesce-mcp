@@ -1,0 +1,75 @@
+Summary: Read-Only Data Engineering Agent
+
+  What We Built
+
+  Architecture (Complete):
+
+  1. ✅ Snowflake RBAC - DATAENG_READ_ONLY role with SELECT-only access to 840+ tables (no INSERT/UPDATE/DELETE)
+  2. ✅ Coalesce MCP Server - Added COALESCE_READONLY_MODE=true support to filter out write tools (create_workspace_node,
+  set_node)
+  3. ✅ Cortex Code Integration - MCP server configured with secure token storage (secret:coalesce_api_token)
+
+  Files Modified:
+
+  • C:\Users\jrobidoux\Documents\coalesce-mcp\src\coalesce_mcp\server.py - Added readonly mode filtering
+
+  ────────────────────────────────────────
+
+  Issues Found During Testing
+
+  1. get_job_details returns JSON parse error
+
+    Error: Expecting value: line 1 column 1 (char 0)
+
+  • The tool calls multiple endpoints (get_run, get_run_status, get_run_results) and combines them
+  • One of these calls is returning empty/invalid response, causing JSON parse failure
+  • Location: client.py lines 607-681
+
+  2. get_run_results returns ALL nodes, not just failures
+
+  • The tool description says it returns "only failures and blocked downstream nodes"
+  • But actual response includes all 67 nodes with "runState": "complete"
+  • The filtering logic exists (_classify_nodes, _format_failed_node) but may not be executing properly
+  • Location: client.py lines 542-604
+
+  3. investigate_failure - Not tested yet
+
+  • This is the recommended tool for failure diagnosis
+  • Should combine run metadata + filtered failure details
+  • Location: client.py lines 684-780
+
+  ────────────────────────────────────────
+
+  Recommended Debugging Steps
+
+  1. Test API responses directly - Check what /v1/runs/{runID}/results actually returns for a failed run
+  2. Verify node status field - The filtering looks for status == "failed" but the API may use different field names (runState
+  vs status)
+  3. Check JSON serialization - get_job_details may be failing because one sub-call returns None or empty string
+  4. Test with a definitively failed node - Find a run where you know a specific node failed with an error message
+
+  ────────────────────────────────────────
+
+  Key Code Locations
+
+  ┌────────────────────────────┬───────────┬─────────┬────────────────────────────────────────┐
+  │ Function                   │ File      │ Lines   │ Purpose                                │
+  ├────────────────────────────┼───────────┼─────────┼────────────────────────────────────────┤
+  │ get_run_results            │ client.py │ 542-604 │ Should filter to failures only         │
+  ├────────────────────────────┼───────────┼─────────┼────────────────────────────────────────┤
+  │ get_job_details            │ client.py │ 607-681 │ Combines status + results (JSON error) │
+  ├────────────────────────────┼───────────┼─────────┼────────────────────────────────────────┤
+  │ investigate_failure        │ client.py │ 684-780 │ Best tool for diagnosis                │
+  ├────────────────────────────┼───────────┼─────────┼────────────────────────────────────────┤
+  │ _classify_nodes            │ client.py │ 469-484 │ Partitions nodes by status             │
+  ├────────────────────────────┼───────────┼─────────┼────────────────────────────────────────┤
+  │ _parse_results_to_node_map │ client.py │ 439-466 │ Normalizes API response                │
+  └────────────────────────────┴───────────┴─────────┴────────────────────────────────────────┘
+
+  ────────────────────────────────────────
+
+  Next Steps (After MCP Fixes)
+
+  1. Fix the MCP server response filtering
+  2. Create agent system prompt with behavioral guidelines
+  3. Test end-to-end: failed run → investigate → query Snowflake tables

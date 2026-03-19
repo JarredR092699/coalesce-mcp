@@ -1,6 +1,6 @@
 """Coalesce MCP Server - Tools for investigating Coalesce pipeline failures."""
 
-__version__ = "0.1.3"
+__version__ = "0.3.0"
 
 from coalesce_mcp.server import main
 

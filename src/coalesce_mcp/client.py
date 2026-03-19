@@ -7,6 +7,7 @@ Based on Coalesce API documentation:
 All endpoints are READ-ONLY. No mutation operations are included.
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime
@@ -126,22 +127,28 @@ class CoalesceClient:
 
     async def get_run(self, run_id: str) -> dict[str, Any]:
         """
-        Get details for a specific run.
+        Get details for a specific run by fetching from list endpoint.
 
-        Endpoint: GET /v1/runs/{runID}
+        The Coalesce API doesn't have a dedicated single-run endpoint.
+        We use list_runs filtered to find the specific run.
 
         Args:
             run_id: The run ID to retrieve
 
         Returns:
-            Run object with details
+            Run object with details, or empty dict if not found
         """
-        client = await self._get_client()
-
-        response = await client.get(f"/v1/runs/{run_id}")
-        response.raise_for_status()
-
-        return response.json()
+        # Use list endpoint and filter - single run endpoint doesn't exist
+        result = await self.list_runs(limit=1, starting_from=str(int(run_id) + 1))
+        for run in result.get("data", []):
+            if str(run.get("id") or run.get("runID")) == str(run_id):
+                return run
+        
+        # Fallback: try scheduler endpoint for status
+        try:
+            return await self.get_run_status(run_id)
+        except Exception:
+            return {"id": run_id, "error": "Run not found"}
 
     async def get_run_status(self, run_id: str) -> dict[str, Any]:
         """
@@ -435,36 +442,180 @@ async def get_run_status(run_id: str) -> str:
         }, indent=2)
 
 
+def _parse_results_to_node_map(results_data: Any) -> dict[str, dict]:
+    """
+    Normalize the run results API response into a flat {node_id: node_dict} map.
+
+    The Coalesce API can return results as:
+    - A flat dict keyed by node ID (most common)
+    - A wrapped object like {"nodes": {...}} or {"data": [...]}
+    - A list of node objects with an "id"/"nodeID" field
+    """
+    if isinstance(results_data, dict):
+        # Check for wrapper keys
+        if "nodes" in results_data and isinstance(results_data["nodes"], dict):
+            return results_data["nodes"]
+        if "data" in results_data and isinstance(results_data["data"], list):
+            return {
+                (n.get("nodeID") or n.get("id")): n
+                for n in results_data["data"]
+                if isinstance(n, dict) and (n.get("nodeID") or n.get("id"))
+            }
+        # Assume flat dict keyed by node ID
+        return {k: v for k, v in results_data.items() if isinstance(v, dict)}
+    if isinstance(results_data, list):
+        return {
+            (n.get("nodeID") or n.get("id")): n
+            for n in results_data
+            if isinstance(n, dict) and (n.get("nodeID") or n.get("id"))
+        }
+    return {}
+
+
+def _classify_nodes(node_map: dict[str, dict]) -> tuple[list, list, list]:
+    """
+    Partition nodes into (failed, skipped_or_canceled, succeeded).
+    Each list contains (node_id, node_dict) tuples.
+    """
+    failed, blocked, succeeded = [], [], []
+    for node_id, node in node_map.items():
+        status = (node.get("status") or node.get("runState") or "").lower()
+        has_error = bool(node.get("errorMessage") or node.get("error"))
+        if status == "failed" or (has_error and status != "success"):
+            failed.append((node_id, node))
+        elif status in ("skipped", "canceled", "cancelled"):
+            blocked.append((node_id, node))
+        elif status in ("success", "succeeded", "completed"):
+            succeeded.append((node_id, node))
+    return failed, blocked, succeeded
+
+
+def _trace_downstream(failed_ids: set[str], node_map: dict[str, dict]) -> set[str]:
+    """
+    Return all node IDs that are downstream of any failed node.
+
+    Uses predecessor info embedded in results when available (BFS).
+    Falls back to returning all skipped/canceled nodes as a heuristic.
+    """
+    # Build successor map from predecessor fields
+    successors: dict[str, set[str]] = {}
+    has_predecessor_info = False
+    for node_id, node in node_map.items():
+        preds = node.get("predecessorNodeIDs") or node.get("predecessors") or []
+        if preds:
+            has_predecessor_info = True
+        for pred_id in preds:
+            successors.setdefault(str(pred_id), set()).add(node_id)
+
+    if not has_predecessor_info:
+        # Heuristic: skipped/canceled nodes are likely downstream
+        return {
+            nid for nid, n in node_map.items()
+            if (n.get("status") or n.get("runState") or "").lower() in ("skipped", "canceled", "cancelled")
+        }
+
+    # BFS from each failed node through the successor graph
+    downstream: set[str] = set()
+    queue = list(failed_ids)
+    while queue:
+        current = queue.pop()
+        for succ in successors.get(current, set()):
+            if succ not in failed_ids and succ not in downstream:
+                downstream.add(succ)
+                queue.append(succ)
+    return downstream
+
+
+def _format_failed_node(node_id: str, node: dict) -> dict:
+    SQL_LIMIT = 500
+    raw_sql = node.get("sql")
+    sql_field: dict[str, Any] = {}
+    if raw_sql:
+        if len(raw_sql) > SQL_LIMIT:
+            sql_field = {"sql": raw_sql[:SQL_LIMIT], "sql_truncated": True}
+        else:
+            sql_field = {"sql": raw_sql}
+    return {
+        "node_id": node_id,
+        "node_name": node.get("nodeName") or node.get("name"),
+        "error": node.get("errorMessage") or node.get("error"),
+        "stage": node.get("stage"),
+        "duration_seconds": node.get("durationSeconds") or node.get("duration"),
+        **sql_field,
+    }
+
+
+def _format_blocked_node(node_id: str, node: dict) -> dict:
+    return {
+        "node_id": node_id,
+        "node_name": node.get("nodeName") or node.get("name"),
+        "status": node.get("status"),
+    }
+
+
 async def get_run_results(run_id: str) -> str:
     """
-    Get detailed results for a job run, including node-level execution details.
+    Get pre-processed results for a job run — only failures and blocked downstream nodes.
+
+    Returns a concise summary instead of a raw dump of every node. For full
+    diagnostic context including run metadata, prefer investigate_failure.
 
     Use this tool to:
-    - See which nodes succeeded or failed
-    - Get error messages for failed nodes
-    - Understand what SQL was executed
-    - Identify the specific transformation that caused a failure
+    - See which nodes failed and what errors they produced
+    - Identify downstream nodes that were blocked by failures
+    - Get execution stats without noise from successful nodes
 
     Args:
         run_id: The ID of the run to get results for
 
     Returns:
-        JSON object with results organized by node, including:
-        - Node status (success/failed)
-        - Error messages
-        - SQL executed
-        - Execution time
+        JSON with summary stats, failed_nodes (with errors + SQL), and
+        downstream_blocked_nodes. Successful nodes are omitted.
     """
     client = get_client()
 
     try:
-        results = await client.get_run_results(run_id)
-        return json.dumps(results, indent=2, default=str)
+        raw = await client.get_run_results(run_id)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to get run results: {e.response.status_code}",
             "run_id": run_id,
         }, indent=2)
+
+    node_map = _parse_results_to_node_map(raw)
+    if not node_map:
+        return json.dumps({"run_id": run_id, "message": "No node results found.", "raw": raw}, indent=2, default=str)
+
+    failed, blocked, succeeded = _classify_nodes(node_map)
+    other_count = len(node_map) - len(failed) - len(blocked) - len(succeeded)
+
+    failed_ids = {nid for nid, _ in failed}
+    downstream_ids = _trace_downstream(failed_ids, node_map)
+    # Merge heuristic-detected blocked nodes with traced downstream nodes
+    all_blocked = {nid for nid, _ in blocked} | downstream_ids
+
+    has_pred_info = any(
+        n.get("predecessorNodeIDs") or n.get("predecessors")
+        for n in node_map.values()
+    )
+
+    return json.dumps({
+        "run_id": run_id,
+        "summary": {
+            "total_nodes": len(node_map),
+            "failed": len(failed),
+            "succeeded": len(succeeded),
+            "downstream_blocked": len(all_blocked),
+            "other": other_count,
+        },
+        "failed_nodes": [_format_failed_node(nid, n) for nid, n in failed],
+        "downstream_blocked_nodes": [
+            _format_blocked_node(nid, node_map[nid])
+            for nid in all_blocked
+            if nid in node_map
+        ],
+        "downstream_tracing": "dependency_graph" if has_pred_info else "heuristic_skipped_nodes",
+    }, indent=2, default=str)
 
 
 async def get_job_details(run_id: str) -> str:
@@ -491,57 +642,130 @@ async def get_job_details(run_id: str) -> str:
     """
     client = get_client()
 
-    # Fetch all available information
-    status_data = None
-    results_data = None
-    run_data = None
+    run_data, results_data = await asyncio.gather(
+        client.get_run(run_id),
+        client.get_run_results(run_id),
+        return_exceptions=True,
+    )
+    if isinstance(run_data, Exception):
+        run_data = None
+    if isinstance(results_data, Exception):
+        results_data = None
 
-    try:
-        run_data = await client.get_run(run_id)
-    except httpx.HTTPStatusError:
-        pass
-
-    try:
-        status_data = await client.get_run_status(run_id)
-    except httpx.HTTPStatusError:
-        pass
-
-    try:
-        results_data = await client.get_run_results(run_id)
-    except httpx.HTTPStatusError:
-        pass
-
-    # Combine into comprehensive response
-    details = {
+    details: dict[str, Any] = {
         "run_id": run_id,
         "run": run_data,
-        "status": status_data,
-        "results": results_data,
     }
 
-    # Extract errors from results for easy access
-    if results_data and isinstance(results_data, dict):
-        errors = []
-        for node_id, node_result in results_data.items():
-            if isinstance(node_result, dict):
-                node_status = node_result.get("status", "").lower()
-                error_msg = node_result.get("errorMessage") or node_result.get("error")
-
-                if node_status == "failed" or error_msg:
-                    errors.append({
-                        "node_id": node_id,
-                        "node_name": node_result.get("nodeName") or node_result.get("name"),
-                        "stage": node_result.get("stage"),
-                        "status": node_status,
-                        "error_message": error_msg,
-                        "sql": node_result.get("sql"),
-                    })
-
-        if errors:
-            details["errors"] = errors
-            details["error_count"] = len(errors)
+    if results_data:
+        node_map = _parse_results_to_node_map(results_data)
+        failed, _, _ = _classify_nodes(node_map)
+        if failed:
+            details["errors"] = [_format_failed_node(nid, n) for nid, n in failed]
+            details["error_count"] = len(failed)
 
     return json.dumps(details, indent=2, default=str)
+
+
+async def investigate_failure(run_id: str) -> str:
+    """
+    Investigate a failed job run end-to-end in a single call.
+
+    Combines get_run + get_run_results to produce a concise, actionable
+    failure report without raw data noise.
+
+    Use this tool to:
+    - Get a complete picture of why a run failed
+    - See all failing nodes, their errors, and affected SQL
+    - Understand downstream impact (which nodes were blocked)
+    - Triage failures quickly without multiple tool calls
+
+    Args:
+        run_id: The ID of the run to investigate
+
+    Returns:
+        JSON with run metadata, failure summary, failed node details (with
+        errors and SQL), and downstream blocked nodes.
+    """
+    client = get_client()
+
+    # Fetch run metadata and results concurrently
+    run_data, results_raw = await asyncio.gather(
+        client.get_run(run_id),
+        client.get_run_results(run_id),
+        return_exceptions=True,
+    )
+
+    # Build run summary (gracefully handle fetch failure)
+    run_summary: dict[str, Any] = {"run_id": run_id}
+    if isinstance(run_data, dict):
+        run_summary.update({
+            "job_name": run_data.get("jobName") or run_data.get("name"),
+            "run_status": run_data.get("runStatus") or run_data.get("status"),
+            "environment_id": run_data.get("environmentID") or run_data.get("environment"),
+            "run_type": run_data.get("runType"),
+            "triggered_by": run_data.get("triggeredBy"),
+            "start_time": run_data.get("runStartTime") or run_data.get("startTime"),
+            "end_time": run_data.get("runEndTime") or run_data.get("endTime"),
+        })
+    elif isinstance(run_data, Exception):
+        run_summary["run_metadata_error"] = str(run_data)
+
+    # Handle results fetch failure
+    if isinstance(results_raw, Exception):
+        return json.dumps({
+            **run_summary,
+            "error": f"Failed to fetch run results: {results_raw}",
+        }, indent=2, default=str)
+
+    node_map = _parse_results_to_node_map(results_raw)
+    if not node_map:
+        return json.dumps({
+            **run_summary,
+            "message": "Run completed with no node-level results available.",
+        }, indent=2, default=str)
+
+    failed, blocked, succeeded = _classify_nodes(node_map)
+    other_count = len(node_map) - len(failed) - len(blocked) - len(succeeded)
+
+    failed_ids = {nid for nid, _ in failed}
+    downstream_ids = _trace_downstream(failed_ids, node_map)
+    all_blocked_ids = {nid for nid, _ in blocked} | downstream_ids
+
+    has_pred_info = any(
+        n.get("predecessorNodeIDs") or n.get("predecessors")
+        for n in node_map.values()
+    )
+
+    if not failed:
+        return json.dumps({
+            **run_summary,
+            "message": "No failed nodes found in results. Run may have succeeded or been canceled.",
+            "summary": {
+                "total_nodes": len(node_map),
+                "succeeded": len(succeeded),
+                "skipped_or_canceled": len(blocked),
+                "other": other_count,
+            },
+        }, indent=2, default=str)
+
+    return json.dumps({
+        "run": run_summary,
+        "summary": {
+            "total_nodes": len(node_map),
+            "failed": len(failed),
+            "succeeded": len(succeeded),
+            "downstream_blocked": len(all_blocked_ids),
+            "other": other_count,
+        },
+        "failed_nodes": [_format_failed_node(nid, n) for nid, n in failed],
+        "downstream_blocked_nodes": [
+            _format_blocked_node(nid, node_map[nid])
+            for nid in all_blocked_ids
+            if nid in node_map
+        ],
+        "downstream_tracing": "dependency_graph" if has_pred_info else "heuristic_skipped_nodes",
+    }, indent=2, default=str)
 
 
 async def list_failed_runs(

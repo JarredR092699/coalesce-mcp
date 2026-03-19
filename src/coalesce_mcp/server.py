@@ -2,12 +2,17 @@
 
 Provides tools for interacting with Coalesce API:
 - Job runs (read-only)
-- Node management (read and write)
+- Node management (read and write, unless COALESCE_READONLY_MODE=true)
 """
+
+import os
 
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
+
+READONLY_MODE = os.getenv("COALESCE_READONLY_MODE", "false").lower() == "true"
+WRITE_TOOLS = {"create_workspace_node", "set_node"}
 
 from coalesce_mcp.client import (
     list_job_runs,
@@ -16,6 +21,7 @@ from coalesce_mcp.client import (
     get_run_results,
     get_job_details,
     list_failed_runs,
+    investigate_failure,
     list_environment_nodes_tool,
     list_workspace_nodes_tool,
     get_workspace_node_tool,
@@ -31,7 +37,7 @@ server = Server("coalesce-mcp")
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools for the Coalesce MCP server."""
-    return [
+    tools = [
         Tool(
             name="list_job_runs",
             description="""List recent job runs from Coalesce.
@@ -138,13 +144,17 @@ Use this tool to:
         ),
         Tool(
             name="get_run_results",
-            description="""Get detailed results for a job run, including node-level execution details.
+            description="""Get pre-processed results for a job run — only failures and blocked downstream nodes.
+
+Returns a concise summary instead of a raw dump of every node. Successful
+nodes are omitted to reduce noise.
 
 Use this tool to:
-- See which nodes succeeded or failed
-- Get error messages for failed nodes
-- Understand what SQL was executed
-- Identify the specific transformation that caused a failure""",
+- See which nodes failed and what errors they produced
+- Identify downstream nodes that were blocked by failures
+- Get execution stats without noise from successful nodes
+
+For full diagnostic context including run metadata, prefer investigate_failure.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -157,18 +167,43 @@ Use this tool to:
             },
         ),
         Tool(
-            name="get_job_details",
-            description="""Get comprehensive details about a job run (combines status + results).
+            name="investigate_failure",
+            description="""Investigate a failed job run end-to-end in a single call.
 
-This is the RECOMMENDED tool for investigating failures. It fetches all available
-information about a run in one call.
+This is the BEST STARTING POINT for failure diagnosis. Combines run metadata,
+node-level failure details, and downstream impact analysis into one concise response.
 
 Use this tool to:
-- Investigate why a specific job failed
-- Get all error messages and node-level status in one call
-- Understand the full execution history of a run
+- Get a complete picture of why a run failed
+- See all failing nodes, their exact error messages, and the SQL that failed
+- Understand downstream impact (which nodes were blocked by upstream failures)
+- Triage pipeline failures quickly without chaining multiple tool calls
 
-Returns run info, status, results, and extracted error details.""",
+Automatically traces downstream blocked nodes using the dependency graph when
+available, or falls back to identifying skipped/canceled nodes as a heuristic.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The ID of the failed run to investigate",
+                    },
+                },
+                "required": ["run_id"],
+            },
+        ),
+        Tool(
+            name="get_job_details",
+            description="""Get comprehensive details about a job run (combines run metadata + extracted errors).
+
+For failure investigation, prefer investigate_failure — it is more concise and
+purpose-built for root cause analysis. Use get_job_details when you want the
+raw run object alongside extracted errors in a single call.
+
+Use this tool to:
+- Get run metadata and extracted error list together
+
+Returns run info and extracted error details for failed nodes.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -345,10 +380,18 @@ Returns updated node object.""",
         ),
     ]
 
+    if READONLY_MODE:
+        tools = [t for t in tools if t.name not in WRITE_TOOLS]
+
+    return tools
+
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls."""
+
+    if READONLY_MODE and name in WRITE_TOOLS:
+        return [TextContent(type="text", text='{"error": "Write operations are disabled in readonly mode"}')]
 
     if name == "list_job_runs":
         result = await list_job_runs(
@@ -393,6 +436,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not run_id:
             return [TextContent(type="text", text='{"error": "run_id is required"}')]
         result = await get_job_details(run_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "investigate_failure":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return [TextContent(type="text", text='{"error": "run_id is required"}')]
+        result = await investigate_failure(run_id)
         return [TextContent(type="text", text=result)]
 
     elif name == "list_environment_nodes":
