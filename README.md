@@ -1,51 +1,45 @@
 # Coalesce MCP Server
 
-A Model Context Protocol (MCP) server for investigating Coalesce data pipeline failures interactively with Claude.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that gives Claude direct access to your [Coalesce](https://coalesce.io) data pipelines. Ask Claude to investigate failures, inspect nodes, and understand your pipeline in plain English — without leaving your chat.
 
-## Overview
+## What it does
 
-This MCP server provides tools to investigate Coalesce job runs, making it easy for data engineers to diagnose pipeline failures directly in Claude Desktop or Claude.ai. Ask Claude about your Coalesce pipelines in natural language and get detailed error analysis, node-level results, and actionable recommendations.
+**Failure investigation** — the primary use case. Ask Claude:
+- *"Why did run 95011 fail?"*
+- *"What failed in the last hour?"*
+- *"Show me the error and SQL from the failing node"*
 
-**What you can do:**
-- List recent job runs and failures
-- Get detailed error messages for failed runs
-- Investigate node-level execution results
-- Understand what SQL was executed
-- Identify root causes of pipeline failures
+Claude will call `investigate_failure`, surface the exact error message, the SQL that failed, and which downstream nodes were blocked — all in one response.
 
-**All operations are read-only** - no jobs are triggered or modified.
+**Node inspection** — browse and read your workspace:
+- *"Show me the columns and transforms for node X"*
+- *"What does this staging table look like?"*
 
-## Installation
+**Node editing** — modify workspace nodes programmatically (disable with `COALESCE_READONLY_MODE=true`):
+- *"Update the SQL on this node"*
+- *"Create a new stage node"*
 
-### Using pip
+## Quick start
 
-```bash
-pip install coalesce-mcp
-```
-
-### Using uv (recommended)
+### 1. Install
 
 ```bash
+# Recommended
+uvx --from coalesce-mcp coalesce-mcp-server
+
+# Or install globally
 uv tool install coalesce-mcp
 ```
 
-## Configuration
-
-### Get Your Coalesce API Token
+### 2. Get your API token
 
 1. Log into Coalesce
 2. Go to **Settings** → **API Tokens**
-3. Create a new token with read access
-4. Copy the token (you'll need it for configuration)
+3. Create a token and copy it
 
-### Configure Claude Desktop
+### 3. Configure Claude Desktop
 
-#### Using uvx (Recommended)
-
-uvx provides isolated environments and is the recommended way to run MCP servers.
-
-**macOS:** Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** Edit `%APPDATA%\Claude\claude_desktop_config.json`
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
@@ -54,247 +48,106 @@ uvx provides isolated environments and is the recommended way to run MCP servers
       "command": "uvx",
       "args": ["--from", "coalesce-mcp", "coalesce-mcp-server"],
       "env": {
-        "COALESCE_API_TOKEN": "your-api-token-here",
-        "COALESCE_BASE_URL": "https://app.coalescesoftware.io/api"
+        "COALESCE_API_TOKEN": "your-token-here"
       }
     }
   }
 }
 ```
 
-#### Using uv tool install
+Restart Claude Desktop. You're done.
 
-First install the tool:
-```bash
-uv tool install coalesce-mcp
+## Tools
+
+### Failure investigation
+
+| Tool | Description |
+|---|---|
+| `investigate_failure` | **Best starting point.** Run metadata + failed nodes (with error messages and SQL) + downstream blocked nodes in one call. |
+| `list_failed_runs` | List recent failed runs. Use this to find a `run_id` to investigate. |
+| `list_job_runs` | List all recent runs with optional filters (status, environment, limit). |
+| `get_run_results` | Node-level results for a run — failures and blocked nodes only, succeeded nodes omitted. |
+| `get_run` | Full metadata for a specific run. |
+| `get_run_status` | Live status via the scheduler endpoint. |
+| `get_job_details` | Run metadata + extracted errors combined. |
+
+### Node management
+
+| Tool | Description |
+|---|---|
+| `list_workspace_nodes` | List all nodes in a workspace. |
+| `list_environment_nodes` | List all deployed nodes in an environment. |
+| `get_workspace_node` | Full node config — columns, transforms, source mappings, SQL. |
+| `get_environment_node` | Same as above for deployed (production) nodes. |
+| `create_workspace_node` | Create a new node with defaults. |
+| `set_node` | Full replacement update of an existing node. **Read first, then write.** |
+
+## Recommended investigation workflow
+
+```
+1. list_failed_runs          → find a run_id
+2. investigate_failure       → root cause + downstream impact
+3. get_workspace_node        → inspect the failing node's SQL and transforms
 ```
 
-Then configure Claude Desktop:
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `COALESCE_API_TOKEN` | required | Bearer token from Coalesce Settings |
+| `COALESCE_BASE_URL` | `https://app.coalescesoftware.io/api/` | Override for on-prem deployments |
+| `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node` and `set_node` |
+
+## Snowflake Cortex CLI
+
+If you're using the Snowflake Cortex CLI, add this to your `mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "coalesce": {
-      "command": "coalesce-mcp-server",
+      "command": "/path/to/coalesce-mcp-server",
       "env": {
-        "COALESCE_API_TOKEN": "your-api-token-here",
-        "COALESCE_BASE_URL": "https://app.coalescesoftware.io/api"
+        "COALESCE_API_TOKEN": "your-token-here",
+        "COALESCE_READONLY_MODE": "true"
       }
     }
   }
 }
 ```
 
-#### Using pip/pipx
-
-First install globally:
-```bash
-# Using pip
-pip install coalesce-mcp
-
-# Or using pipx (isolated)
-pipx install coalesce-mcp
-```
-
-Then use the same configuration as "uv tool install" above
-
-### Restart Claude Desktop
-
-After updating the configuration, restart Claude Desktop to load the MCP server.
-
-## Available Tools
-
-The server provides 6 tools for investigating Coalesce job runs:
-
-### 1. `list_job_runs`
-
-Lists recent job runs with optional filters.
-
-**Parameters:**
-- `environment_id` (optional): Filter by environment ID
-- `run_status` (optional): Filter by status - `running`, `completed`, `failed`, `canceled`
-- `limit` (optional): Maximum number of runs to return (default 50)
-- `starting_from` (optional): Cursor for pagination
-
-**Example prompts:**
-- "Show me recent Coalesce runs"
-- "List all completed runs from the last week"
-
-### 2. `list_failed_runs`
-
-Convenience tool that filters for failed runs only.
-
-**Parameters:**
-- `environment_id` (optional): Filter by environment ID
-- `limit` (optional): Maximum number of failed runs (default 20)
-- `starting_from` (optional): Cursor for pagination
-
-**Example prompts:**
-- "What jobs have failed recently?"
-- "Show me all failed runs"
-
-### 3. `get_run`
-
-Gets full details for a specific run.
-
-**Parameters:**
-- `run_id` (required): The ID of the run to retrieve
-
-**Example prompts:**
-- "Get details for run 79458"
-- "Show me information about run 12345"
-
-### 4. `get_run_status`
-
-Gets the current status of a run.
-
-**Parameters:**
-- `run_id` (required): The ID of the run to check
-
-**Example prompts:**
-- "Is run 79458 still running?"
-- "What's the status of run 12345?"
-
-### 5. `get_run_results`
-
-Gets node-level execution results.
-
-**Parameters:**
-- `run_id` (required): The ID of the run to get results for
-
-**Example prompts:**
-- "Show me which nodes failed in run 79458"
-- "What are the execution results for run 12345?"
-
-### 6. `get_job_details` (RECOMMENDED)
-
-Combines all information about a run in one call - status, results, and extracted error details.
-
-**Parameters:**
-- `run_id` (required): The ID of the run to investigate
-
-**Example prompts:**
-- "Investigate failure in run 79458"
-- "What went wrong with run 12345?"
-- "Analyze run 79458 and explain the error"
-
-## Usage Examples
-
-Once installed and configured, you can ask Claude questions like:
-
-```
-"Can you list recent failed Coalesce runs?"
-
-"What went wrong with run 79458?"
-
-"Show me the error messages from the latest failed run"
-
-"Which nodes failed in run 79458 and what were the error messages?"
-
-"Investigate the most recent failure and explain what happened"
-
-"List all runs from the production environment"
-```
-
-Claude will use the appropriate tools to answer your questions and provide detailed analysis.
-
-## Requirements
-
-- **Python:** 3.10 or higher
-- **Coalesce account:** With API access
-- **API token:** Read access to job runs
-
-## Security
-
-- **API tokens are environment variables** - never hardcoded
-- **Each user provides their own token** - decentralized authentication
-- **Read-only operations** - no jobs are triggered or modified
-- **No logging of credentials** - tokens are kept secure
-
-## Troubleshooting
-
-### Known Issues
-
-**Version 0.1.2 is broken.** If you installed version 0.1.2, you'll see `ModuleNotFoundError: No module named 'coalesce_mcp'`. Upgrade to version 0.1.3 or later:
-
-```bash
-# Using uvx (recommended)
-uvx coalesce-mcp@latest
-
-# Using pip
-pip install --upgrade coalesce-mcp
-
-# Using uv tool
-uv tool upgrade coalesce-mcp
-```
-
-### Verify Installation
-
-After installation, verify it's working correctly:
-
-```bash
-# Check version (should be 0.1.3 or later)
-python -c "import coalesce_mcp; print(coalesce_mcp.__version__)"
-
-# Verify command exists
-coalesce-mcp-server --help
-```
-
-If the import fails, you may have the broken 0.1.2 version - upgrade using the commands above.
-
-### MCP Server Not Detected
-
-1. Verify the configuration path is correct for your OS
-2. Check that the JSON is valid (no trailing commas)
-3. Restart Claude Desktop after configuration changes
-4. Check Claude Desktop logs for error messages
-
-### Authentication Errors
-
-1. Verify your API token is correct
-2. Check that the token has read access to job runs
-3. Ensure `COALESCE_BASE_URL` is set correctly
-
-### Command Not Found
-
-If `coalesce-mcp-server` command is not found:
-
-```bash
-# Using uvx (recommended)
-uvx coalesce-mcp
-
-# Using pip
-pip install --force-reinstall coalesce-mcp
-
-# Using uv tool
-uv tool install --force coalesce-mcp
-```
+Set `COALESCE_READONLY_MODE=true` if your agent role is read-only.
 
 ## Development
 
-To contribute or modify the server:
-
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/coalesce-mcp.git
+git clone https://github.com/JarredR092699/coalesce-mcp.git
 cd coalesce-mcp
 
-# Install dependencies
-pip install -e .
+# Install with dev dependencies
+uv sync
 
 # Run tests
-pytest
+uv run pytest
+
+# Run against real API (requires .env with COALESCE_API_TOKEN)
+uv run python test_debug.py
+
+# Install locally
+uv tool install . --force
 ```
+
+## Requirements
+
+- Python 3.10+
+- A Coalesce account with API access
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT — see [LICENSE](LICENSE)
 
-## Support
+## Links
 
-- **Issues:** https://github.com/JarredR092699/coalesce-mcp/issues
-- **Coalesce API Docs:** https://docs.coalesce.io/docs/api
-
-## Credits
-
-Built with the [Model Context Protocol](https://modelcontextprotocol.io/) for Claude AI integration.
+- [Issues](https://github.com/JarredR092699/coalesce-mcp/issues)
+- [Coalesce API docs](https://docs.coalesce.io/docs/api)
+- [Model Context Protocol](https://modelcontextprotocol.io/)

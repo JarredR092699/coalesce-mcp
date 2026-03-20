@@ -21,7 +21,7 @@ class CoalesceClient:
 
     def __init__(self):
         # Get config from environment (set by MCP server launcher)
-        self.base_url = os.getenv("COALESCE_BASE_URL", "https://app.coalescesoftware.io/api").rstrip("/")
+        self.base_url = os.getenv("COALESCE_BASE_URL", "https://app.coalescesoftware.io/api/").rstrip("/") + "/"
         self.token = os.getenv("COALESCE_API_TOKEN", "")
         self._client: httpx.AsyncClient | None = None
 
@@ -92,7 +92,7 @@ class CoalesceClient:
         full_url = f"{client.base_url}/v1/runs"
         logger.info(f"Calling Coalesce API: {full_url} with params: {params}")
 
-        response = await client.get("/v1/runs", params=params)
+        response = await client.get("v1/runs", params=params)
 
         logger.info(f"Response status: {response.status_code}")
         logger.debug(f"Response headers: {response.headers}")
@@ -164,7 +164,7 @@ class CoalesceClient:
         """
         client = await self._get_client()
 
-        response = await client.get("/scheduler/runStatus", params={"runID": run_id})
+        response = await client.get("scheduler/runStatus", params={"runID": run_id})
         response.raise_for_status()
 
         if not response.content:
@@ -185,7 +185,7 @@ class CoalesceClient:
         """
         client = await self._get_client()
 
-        response = await client.get(f"/v1/runs/{run_id}/results")
+        response = await client.get(f"v1/runs/{run_id}/results")
         response.raise_for_status()
 
         if not response.content:
@@ -209,7 +209,7 @@ class CoalesceClient:
             Dict with array of node objects
         """
         client = await self._get_client()
-        response = await client.get(f"/api/v1/environments/{environment_id}/nodes")
+        response = await client.get(f"v1/environments/{environment_id}/nodes")
         response.raise_for_status()
         return response.json()
 
@@ -226,7 +226,7 @@ class CoalesceClient:
             Dict with array of node objects
         """
         client = await self._get_client()
-        response = await client.get(f"/api/v1/workspaces/{workspace_id}/nodes")
+        response = await client.get(f"v1/workspaces/{workspace_id}/nodes")
         response.raise_for_status()
         return response.json()
 
@@ -244,8 +244,10 @@ class CoalesceClient:
             Complete node object with metadata
         """
         client = await self._get_client()
-        response = await client.get(f"/api/v1/workspaces/{workspace_id}/nodes/{node_id}")
+        response = await client.get(f"v1/workspaces/{workspace_id}/nodes/{node_id}")
         response.raise_for_status()
+        if not response.content:
+            return {}
         return response.json()
 
     async def get_environment_node(self, environment_id: str, node_id: str) -> dict[str, Any]:
@@ -262,8 +264,10 @@ class CoalesceClient:
             Complete node object with metadata
         """
         client = await self._get_client()
-        response = await client.get(f"/api/v1/environments/{environment_id}/nodes/{node_id}")
+        response = await client.get(f"v1/environments/{environment_id}/nodes/{node_id}")
         response.raise_for_status()
+        if not response.content:
+            return {}
         return response.json()
 
     async def create_workspace_node(
@@ -287,7 +291,7 @@ class CoalesceClient:
         """
         client = await self._get_client()
         response = await client.post(
-            f"/api/v1/workspaces/{workspace_id}/nodes",
+            f"v1/workspaces/{workspace_id}/nodes",
             json={
                 "nodeType": node_type,
                 "predecessorNodeIDs": predecessor_node_ids,
@@ -317,7 +321,7 @@ class CoalesceClient:
         """
         client = await self._get_client()
         response = await client.put(
-            f"/api/v1/workspaces/{workspace_id}/nodes/{node_id}",
+            f"v1/workspaces/{workspace_id}/nodes/{node_id}",
             json=node_data
         )
         response.raise_for_status()
@@ -480,16 +484,20 @@ def _classify_nodes(node_map: dict[str, dict]) -> tuple[list, list, list]:
     """
     Partition nodes into (failed, skipped_or_canceled, succeeded).
     Each list contains (node_id, node_dict) tuples.
+
+    Handles both field naming conventions from the Coalesce API:
+    - runState: "error" | "complete" | "skipped"  (results endpoint)
+    - status:   "failed" | "success" | "canceled"  (older/alternate shape)
     """
     failed, blocked, succeeded = [], [], []
     for node_id, node in node_map.items():
         status = (node.get("status") or node.get("runState") or "").lower()
         has_error = bool(node.get("errorMessage") or node.get("error"))
-        if status == "failed" or (has_error and status != "success"):
+        if status in ("failed", "error") or (has_error and status not in ("success", "complete")):
             failed.append((node_id, node))
         elif status in ("skipped", "canceled", "cancelled"):
             blocked.append((node_id, node))
-        elif status in ("success", "succeeded", "completed"):
+        elif status in ("success", "succeeded", "completed", "complete"):
             succeeded.append((node_id, node))
     return failed, blocked, succeeded
 
@@ -530,19 +538,54 @@ def _trace_downstream(failed_ids: set[str], node_map: dict[str, dict]) -> set[st
     return downstream
 
 
+def _extract_query_results_error(node: dict) -> tuple[str | None, str | None]:
+    """
+    Extract the error message and failing SQL from the queryResults list.
+
+    The results endpoint nests errors inside queryResults[].error.errorString
+    and the SQL in queryResults[].sql on the failed query step.
+
+    Returns (error_message, sql) — either may be None.
+    """
+    error_msg: str | None = None
+    error_sql: str | None = None
+    for qr in node.get("queryResults", []):
+        if not qr.get("success", True):
+            err = qr.get("error", {})
+            if isinstance(err, dict):
+                error_msg = err.get("errorString") or err.get("message")
+            elif isinstance(err, str):
+                error_msg = err
+            error_sql = qr.get("sql") or error_sql
+            break  # Use first failure
+    return error_msg, error_sql
+
+
 def _format_failed_node(node_id: str, node: dict) -> dict:
     SQL_LIMIT = 500
+
+    # Try top-level fields first (older/alternate API shape)
+    error_msg = node.get("errorMessage") or node.get("error")
     raw_sql = node.get("sql")
+
+    # Fall back to queryResults nested structure (results endpoint shape)
+    if not error_msg or not raw_sql:
+        qr_error, qr_sql = _extract_query_results_error(node)
+        error_msg = error_msg or qr_error
+        raw_sql = raw_sql or qr_sql
+
     sql_field: dict[str, Any] = {}
     if raw_sql:
+        raw_sql = raw_sql.strip()
         if len(raw_sql) > SQL_LIMIT:
             sql_field = {"sql": raw_sql[:SQL_LIMIT], "sql_truncated": True}
         else:
             sql_field = {"sql": raw_sql}
+
     return {
         "node_id": node_id,
         "node_name": node.get("nodeName") or node.get("name"),
-        "error": node.get("errorMessage") or node.get("error"),
+        "error": error_msg,
         "stage": node.get("stage"),
         "duration_seconds": node.get("durationSeconds") or node.get("duration"),
         **sql_field,
@@ -595,8 +638,8 @@ async def get_run_results(run_id: str) -> str:
 
     failed_ids = {nid for nid, _ in failed}
     downstream_ids = _trace_downstream(failed_ids, node_map)
-    # Merge heuristic-detected blocked nodes with traced downstream nodes
-    all_blocked = {nid for nid, _ in blocked} | downstream_ids
+    # Merge heuristic-detected blocked nodes with traced downstream nodes; exclude failed nodes
+    all_blocked = ({nid for nid, _ in blocked} | downstream_ids) - failed_ids
 
     has_pred_info = any(
         n.get("predecessorNodeIDs") or n.get("predecessors")
@@ -734,7 +777,7 @@ async def investigate_failure(run_id: str) -> str:
 
     failed_ids = {nid for nid, _ in failed}
     downstream_ids = _trace_downstream(failed_ids, node_map)
-    all_blocked_ids = {nid for nid, _ in blocked} | downstream_ids
+    all_blocked_ids = ({nid for nid, _ in blocked} | downstream_ids) - failed_ids
 
     has_pred_info = any(
         n.get("predecessorNodeIDs") or n.get("predecessors")
@@ -826,7 +869,12 @@ async def list_environment_nodes_tool(environment_id: str) -> str:
     client = get_client()
     try:
         result = await client.list_environment_nodes(environment_id)
-        return json.dumps(result, indent=2, default=str)
+        nodes = result if isinstance(result, list) else result.get("data", [])
+        slim = [
+            {k: n[k] for k in ("id", "name", "nodeType", "locationName", "database", "schema") if k in n}
+            for n in nodes
+        ]
+        return json.dumps({"nodes": slim, "total": result.get("total") if isinstance(result, dict) else len(slim)}, indent=2, default=str)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to list environment nodes: {e.response.status_code}",
@@ -854,7 +902,12 @@ async def list_workspace_nodes_tool(workspace_id: str) -> str:
     client = get_client()
     try:
         result = await client.list_workspace_nodes(workspace_id)
-        return json.dumps(result, indent=2, default=str)
+        nodes = result if isinstance(result, list) else result.get("data", [])
+        slim = [
+            {k: n[k] for k in ("id", "name", "nodeType", "locationName", "database", "schema") if k in n}
+            for n in nodes
+        ]
+        return json.dumps({"nodes": slim, "total": result.get("total") if isinstance(result, dict) else len(slim)}, indent=2, default=str)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to list workspace nodes: {e.response.status_code}",
@@ -863,27 +916,81 @@ async def list_workspace_nodes_tool(workspace_id: str) -> str:
         }, indent=2)
 
 
+def _slim_node(node: dict) -> dict:
+    """
+    Reduce a full node object to only the fields useful for failure diagnosis.
+    Strips internal graph wiring, empty fields, and boilerplate system columns.
+    """
+    metadata = node.get("metadata", {})
+
+    # Slim each column down to what matters for diagnosis
+    slim_columns = []
+    for col in metadata.get("columns", []):
+        # Skip system-generated columns — they're boilerplate, not failure-relevant
+        if any(col.get(k) for k in ("isSystemVersion", "isSystemCurrentFlag", "isSystemStartDate", "isSystemEndDate", "isSystemCreateDate", "isSystemUpdateDate")):
+            continue
+        transforms = [
+            s.get("transform", "")
+            for s in col.get("sources", [])
+            if s.get("transform", "")
+        ]
+        entry: dict[str, Any] = {
+            "name": col.get("name"),
+            "dataType": col.get("dataType"),
+        }
+        if col.get("nullable") is False:
+            entry["nullable"] = False
+        if transforms:
+            entry["transforms"] = transforms
+        slim_columns.append(entry)
+
+    # Slim source mappings — keep join SQL, custom SQL, and upstream dependencies
+    slim_sources = []
+    for sm in metadata.get("sourceMapping", []):
+        slim_sources.append({
+            "name": sm.get("name"),
+            "dependencies": sm.get("dependencies", []),
+            "join": sm.get("join", {}).get("joinCondition", ""),
+            "customSQL": sm.get("customSQL", {}).get("customSQL", ""),
+        })
+
+    return {
+        "name": node.get("name"),
+        "nodeType": node.get("nodeType"),
+        "locationName": node.get("locationName"),
+        "materializationType": node.get("materializationType"),
+        "database": node.get("database"),
+        "schema": node.get("schema"),
+        "description": node.get("description", ""),
+        "overrideSQL": node.get("overrideSQL", ""),
+        "config": {k: v for k, v in node.get("config", {}).items() if v not in ("", None, False, [], {})},
+        "columns": slim_columns,
+        "sourceMapping": slim_sources,
+    }
+
+
 async def get_workspace_node_tool(workspace_id: str, node_id: str) -> str:
     """
-    Get complete details for a specific workspace node.
+    Get details for a specific workspace node, focused on failure diagnosis.
 
     Use this tool to:
-    - View full node configuration and SQL
-    - Understand a transformation's logic
-    - Get metadata for a specific node
-    - Inspect node properties before updating
+    - Understand a transformation's SQL logic and column expressions
+    - See upstream dependencies (what feeds this node)
+    - Inspect column transforms where SQL errors commonly live
+    - Check node config (materialization, warehouse settings)
 
     Args:
         workspace_id: The workspace ID containing the node
         node_id: The node ID to retrieve
 
     Returns:
-        JSON object with complete node details including SQL, metadata, and configuration
+        JSON object with node name, type, config, column transforms, and source SQL.
+        Internal graph wiring and empty fields are omitted to reduce noise.
     """
     client = get_client()
     try:
         result = await client.get_workspace_node(workspace_id, node_id)
-        return json.dumps(result, indent=2, default=str)
+        return json.dumps(_slim_node(result), indent=2, default=str)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to get workspace node: {e.response.status_code}",
@@ -913,7 +1020,7 @@ async def get_environment_node_tool(environment_id: str, node_id: str) -> str:
     client = get_client()
     try:
         result = await client.get_environment_node(environment_id, node_id)
-        return json.dumps(result, indent=2, default=str)
+        return json.dumps(_slim_node(result), indent=2, default=str)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to get environment node: {e.response.status_code}",

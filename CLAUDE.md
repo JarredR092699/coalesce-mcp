@@ -127,40 +127,59 @@ All calls go to `COALESCE_BASE_URL`. Auth is `Authorization: Bearer <token>`.
 ## Key Data Shapes
 
 ### Run results (`/v1/runs/{runID}/results`)
-Flat dict keyed by node ID. Possible `status` values: `success`, `failed`, `skipped`, `canceled`, `running`.
+The actual API response shape from `/v1/runs/{runID}/results` is a **list wrapped in `{"data": [...]}`**, not a flat dict. Each node object looks like:
+
 ```json
 {
-  "node-id-1": {
-    "status": "failed",
-    "nodeName": "dim_customer",
-    "errorMessage": "SQL compilation error...",
-    "stage": "transform",
-    "sql": "CREATE TABLE ...",
-    "durationSeconds": 12.5
-  }
+  "nodeID": "abc123",
+  "runState": "error",
+  "name": "dim_customer",
+  "queryResults": [
+    {
+      "status": "Success",
+      "success": true,
+      "sql": "...",
+      "type": "sql"
+    },
+    {
+      "status": "Failure",
+      "success": false,
+      "error": {
+        "errorString": "Numeric value '3W' is not recognized",
+        "errorDetail": "000627"
+      },
+      "sql": "INSERT INTO ...",
+      "type": "sql"
+    }
+  ]
 }
 ```
+
+Key field mapping:
+- `runState`: `"complete"` / `"error"` / `"skipped"` (not `"success"/"failed"`)
+- Errors are nested inside `queryResults[].error.errorString` (not top-level `errorMessage`)
+- SQL is in `queryResults[].sql` on the failed query step
+
+`_classify_nodes` handles both the old and new field shapes. `_extract_query_results_error` walks `queryResults` to find the first failed step and extracts its error and SQL.
 
 Some results include `predecessorNodeIDs`/`predecessors` fields enabling exact downstream tracing via BFS; without them, `_trace_downstream` falls back to treating `skipped`/`canceled` nodes as likely-downstream.
 
 ---
 
-## Known Bugs (from 2026-03-18 testing)
+## Bug History
 
-1. ~~**`get_job_details` JSON parse error**~~ — **Fixed (2026-03-19).** Root cause: `CoalesceClient.get_run_status` and `CoalesceClient.get_run_results` called `response.json()` with no empty-body guard. A 2xx response with an empty body throws `json.JSONDecodeError`, which the MCP-level `except httpx.HTTPStatusError` clauses don't catch, crashing the tool call. Fixed by adding `if not response.content: return {}` to both methods, matching the pattern already used in `list_runs`.
+1. ~~**`get_job_details` JSON parse error**~~ — **Fixed (2026-03-19).** Empty body guard added to `get_run_status` and `get_run_results`.
 
-2. ~~**`get_run_results` may return all nodes**~~ — **Fixed.** `_classify_nodes` already checks both `node.get("status") or node.get("runState")`, so API field name differences are handled. `_format_blocked_node` was also updated (2026-03-19) to apply the same fallback so `downstream_blocked_nodes[].status` reflects the actual state rather than `null`.
+2. ~~**Failed nodes not detected (`failed: 0`)**~~ — **Fixed (2026-03-20).** `_classify_nodes` now recognizes `runState: "error"` and `runState: "complete"`. `_extract_query_results_error` added to pull errors from `queryResults[].error.errorString`.
 
-3. **`investigate_failure` field name issue** — **Fixed** (same fix as #2). The `_classify_nodes` pipeline correctly handles both `status` and `runState`. The remaining gap (`_format_blocked_node` showing `null` status for blocked nodes) was fixed 2026-03-19.
+3. ~~**Failed nodes leaking into `downstream_blocked_nodes`**~~ — **Fixed (2026-03-20).** `all_blocked_ids` now excludes `failed_ids`.
 
-**Debugging approach:** Test with a definitively failed run, log the raw `results_data` from `client.get_run_results()` to verify the actual field names before assuming the filtering works.
+4. ~~**Double `/api/api/` in URL**~~ — **Fixed.** `base_url` always ends with `/` and all request paths are relative (no leading slash).
 
 ---
 
 ## Other Known Issues
 
-- `tests/` directory is empty — no automated tests
-- `__init__.py` shows version `0.1.3` but `pyproject.toml` says `0.2.0` (version drift)
 - No retry logic on HTTP errors
 - `CoalesceClient` is never explicitly closed (no shutdown hook)
-- `logging.getLogger(__name__)` is called inline inside methods rather than at module level
+- `logging.getLogger(__name__)` is called inline inside `list_runs` rather than at module level
