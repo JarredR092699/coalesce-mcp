@@ -557,3 +557,37 @@ class TestGetRun:
         # Should not raise — should return JSON
         parsed = json.loads(result)
         assert parsed is not None
+
+
+@pytest.mark.asyncio
+class TestNodeManagementEmptyBodies:
+    """Test that node management methods handle empty response bodies gracefully."""
+
+    async def test_list_workspace_nodes_empty_body(self):
+        from coalesce_mcp.client import list_workspace_nodes_tool
+        routes = {"/v1/workspaces/1/nodes": (200, b"")}
+        client = _make_client(routes)
+        import coalesce_mcp.client as mod
+        orig = mod._client
+        mod._client = client
+        try:
+            result = await list_workspace_nodes_tool("1")
+        finally:
+            mod._client = orig
+        # Should return valid JSON, not raise
+        parsed = json.loads(result)
+        assert isinstance(parsed, dict)
+
+    async def test_list_environment_nodes_empty_body(self):
+        from coalesce_mcp.client import list_environment_nodes_tool
+        routes = {"/v1/environments/1/nodes": (200, b"")}
+        client = _make_client(routes)
+        import coalesce_mcp.client as mod
+        orig = mod._client
+        mod._client = client
+        try:
+            result = await list_environment_nodes_tool("1")
+        finally:
+            mod._client = orig
+        parsed = json.loads(result)
+        assert isinstance(parsed, dict)

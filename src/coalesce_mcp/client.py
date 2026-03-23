@@ -211,6 +211,8 @@ class CoalesceClient:
         client = await self._get_client()
         response = await client.get(f"v1/environments/{environment_id}/nodes")
         response.raise_for_status()
+        if not response.content:
+            return {"data": []}
         return response.json()
 
     async def list_workspace_nodes(self, workspace_id: str) -> dict[str, Any]:
@@ -228,6 +230,8 @@ class CoalesceClient:
         client = await self._get_client()
         response = await client.get(f"v1/workspaces/{workspace_id}/nodes")
         response.raise_for_status()
+        if not response.content:
+            return {"data": []}
         return response.json()
 
     async def get_workspace_node(self, workspace_id: str, node_id: str) -> dict[str, Any]:
@@ -298,6 +302,8 @@ class CoalesceClient:
             }
         )
         response.raise_for_status()
+        if not response.content:
+            return {}
         return response.json()
 
     async def set_node(
@@ -325,6 +331,8 @@ class CoalesceClient:
             json=node_data
         )
         response.raise_for_status()
+        if not response.content:
+            return {}
         return response.json()
 
 
