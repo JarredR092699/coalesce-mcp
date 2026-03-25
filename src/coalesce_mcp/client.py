@@ -20,7 +20,6 @@ class CoalesceClient:
     """HTTP client for Coalesce API."""
 
     def __init__(self):
-        # Get config from environment (set by MCP server launcher)
         self.base_url = os.getenv("COALESCE_BASE_URL", "https://app.coalescesoftware.io/api/").rstrip("/") + "/"
         self.token = os.getenv("COALESCE_API_TOKEN", "")
         self._client: httpx.AsyncClient | None = None

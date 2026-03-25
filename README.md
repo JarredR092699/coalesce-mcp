@@ -94,13 +94,33 @@ Restart Claude Desktop. You're done.
 
 | Variable | Default | Description |
 |---|---|---|
-| `COALESCE_API_TOKEN` | required | Bearer token from Coalesce Settings |
+| `COALESCE_API_TOKEN` | required | Bearer token from Coalesce Settings → API Tokens |
 | `COALESCE_BASE_URL` | `https://app.coalescesoftware.io/api/` | Override for on-prem deployments |
 | `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node` and `set_node` |
 
+## Switching Between Coalesce Accounts
+
+The simplest way to switch accounts is to update `COALESCE_API_TOKEN` in your `.env` file.
+
+Copy `.env.example` to `.env` and fill in your token:
+
+```bash
+cp .env.example .env
+# Edit .env and set COALESCE_API_TOKEN to your token
+```
+
+To connect to a different account, replace the token value in `.env` with the new account's token, then restart your MCP host (Claude Desktop or Cortex CLI).
+
+```bash
+# .env
+COALESCE_API_TOKEN=your-new-account-token-here
+```
+
+> **Never commit `.env` to git.** It is listed in `.gitignore`. Use `.env.example` as a reference template instead.
+
 ## Snowflake Cortex CLI
 
-If you're using the Snowflake Cortex CLI, add this to your `mcp.json`:
+Add this to `~/.snowflake/cortex/mcp.json`, with your token pasted in directly:
 
 ```json
 {
@@ -115,6 +135,8 @@ If you're using the Snowflake Cortex CLI, add this to your `mcp.json`:
   }
 }
 ```
+
+> **Note:** The Cortex CLI does not expand shell variables — paste the token value directly rather than using `${COALESCE_API_TOKEN}`.
 
 Set `COALESCE_READONLY_MODE=true` if your agent role is read-only.
 

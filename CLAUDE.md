@@ -50,11 +50,15 @@ Python 3.10+ required. Key deps: `mcp>=1.0.0`, `httpx>=0.27.0`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `COALESCE_API_TOKEN` | (required) | Bearer token |
+| `COALESCE_API_TOKEN` | (required) | Bearer token — set in `.env` or directly in the MCP host config |
 | `COALESCE_BASE_URL` | `https://app.coalescesoftware.io/api` | Override for on-prem |
 | `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node` and `set_node` tools |
 
 `COALESCE_READONLY_MODE` is used in the Snowflake Cortex CLI integration — the agent has a `DATAENG_READ_ONLY` Snowflake role and the readonly mode prevents write tool exposure.
+
+**Switching accounts:** Update `COALESCE_API_TOKEN` in `.env` (for local dev) or in `~/.snowflake/cortex/mcp.json` (for Cortex CLI), then restart the MCP host.
+
+**Note:** The Cortex CLI does **not** expand `${VAR}` references in `mcp.json` — paste token values directly.
 
 Claude Desktop config snippet:
 ```json
