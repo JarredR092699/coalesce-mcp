@@ -18,6 +18,7 @@ Claude will call `investigate_failure`, surface the exact error message, the SQL
 **Node editing** — modify workspace nodes programmatically (disable with `COALESCE_READONLY_MODE=true`):
 - *"Update the SQL on this node"*
 - *"Create a new stage node"*
+- *"Apply the TRY_CAST fix to the failing column"*
 
 ## Quick start
 
@@ -81,6 +82,7 @@ Restart Claude Desktop. You're done.
 | `get_environment_node` | Same as above for deployed (production) nodes. |
 | `create_workspace_node` | Create a new node with defaults. |
 | `set_node` | Full replacement update of an existing node. **Read first, then write.** |
+| `patch_node_field` | Surgical single-field update (e.g. fix one column transform). Handles fetch-modify-replace internally. |
 
 ## Recommended investigation workflow
 
@@ -88,6 +90,7 @@ Restart Claude Desktop. You're done.
 1. list_failed_runs          → find a run_id
 2. investigate_failure       → root cause + downstream impact
 3. get_workspace_node        → inspect the failing node's SQL and transforms
+4. patch_node_field          → apply the fix (with your approval)
 ```
 
 ## Configuration
@@ -96,7 +99,7 @@ Restart Claude Desktop. You're done.
 |---|---|---|
 | `COALESCE_API_TOKEN` | required | Bearer token from Coalesce Settings → API Tokens |
 | `COALESCE_BASE_URL` | `https://app.coalescesoftware.io/api/` | Override for on-prem deployments |
-| `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node` and `set_node` |
+| `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node`, `set_node`, and `patch_node_field` |
 
 ## Switching Between Coalesce Accounts
 
@@ -151,9 +154,6 @@ uv sync
 
 # Run tests
 uv run pytest
-
-# Run against real API (requires .env with COALESCE_API_TOKEN)
-uv run python test_debug.py
 
 # Install locally
 uv tool install . --force

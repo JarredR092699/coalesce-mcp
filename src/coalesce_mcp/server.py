@@ -12,7 +12,7 @@ from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 
 READONLY_MODE = os.getenv("COALESCE_READONLY_MODE", "false").lower() == "true"
-WRITE_TOOLS = {"create_workspace_node", "set_node"}
+WRITE_TOOLS = {"create_workspace_node", "set_node", "patch_node_field"}
 
 from coalesce_mcp.client import (
     list_job_runs,
@@ -28,6 +28,7 @@ from coalesce_mcp.client import (
     get_environment_node_tool,
     create_workspace_node_tool,
     set_node_tool,
+    patch_node_field_tool,
 )
 
 # Create MCP server instance
@@ -378,6 +379,52 @@ Returns updated node object.""",
                 "required": ["workspace_id", "node_id", "node_config_json"],
             },
         ),
+        Tool(
+            name="patch_node_field",
+            description="""Apply a targeted, surgical update to a single field on a workspace node.
+
+Handles the full fetch-modify-replace cycle internally — you only need to
+provide the path to the field you want to change and its new value.
+
+Supported field_path expressions (raw API node shape):
+- "metadata.columns[N].sources[N].transform"  — column-level SQL transform (most common fix)
+- "config.whereClause"                         — WHERE clause modifier
+- "config.preSQL" / "config.postSQL"           — pre/post SQL hooks
+- "metadata.storageMapping[N].join"            — JOIN condition on a source mapping
+- "metadata.storageMapping[N].customSQL"       — custom SQL on a source mapping
+
+Use this tool to:
+- Apply a targeted SQL fix (e.g. CAST → TRY_CAST) to a single column transform
+- Update a WHERE clause or JOIN condition without touching the rest of the node
+- Patch the overrideSQL body
+
+IMPORTANT: Always show the user a before/after diff and get explicit confirmation
+before calling this tool.
+
+Returns a diff summary: node_name, field_path, old_value, new_value.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "The workspace ID containing the node",
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "The node ID to update",
+                    },
+                    "field_path": {
+                        "type": "string",
+                        "description": "Dot/bracket path to the field to update using raw API node shape (e.g. 'metadata.columns[4].sources[0].transform', 'config.whereClause')",
+                    },
+                    "new_value": {
+                        "type": "string",
+                        "description": "The new value to set at that path",
+                    },
+                },
+                "required": ["workspace_id", "node_id", "field_path", "new_value"],
+            },
+        ),
     ]
 
     if READONLY_MODE:
@@ -491,6 +538,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not workspace_id or not node_id or not node_config_json:
             return [TextContent(type="text", text='{"error": "workspace_id, node_id, and node_config_json are required"}')]
         result = await set_node_tool(workspace_id, node_id, node_config_json)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "patch_node_field":
+        workspace_id = arguments.get("workspace_id")
+        node_id = arguments.get("node_id")
+        field_path = arguments.get("field_path")
+        new_value = arguments.get("new_value")
+        if not workspace_id or not node_id or not field_path or new_value is None:
+            return [TextContent(type="text", text='{"error": "workspace_id, node_id, field_path, and new_value are required"}')]
+        result = await patch_node_field_tool(workspace_id, node_id, field_path, new_value)
         return [TextContent(type="text", text=result)]
 
     else:

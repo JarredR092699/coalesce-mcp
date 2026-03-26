@@ -12,6 +12,7 @@ allowed-tools:
   - mcp__coalesce__get_environment_node
   - mcp__coalesce__get_workspace_node
   - mcp__coalesce__set_node
+  - mcp__coalesce__patch_node_field
 ---
 
 # Coalesce Job Failure Investigation
@@ -118,16 +119,19 @@ This is the **best single tool** for failure diagnosis. It returns:
 2. **Impact** — which downstream nodes were blocked
 3. **The failing SQL snippet** if available
 
-Ask the user if they want to inspect the full node definition/SQL.
+**Ask for the workspace ID now** — before proceeding to Step 3. The workspace ID is not included in run metadata and cannot be looked up programmatically. Tell the user:
+> "To inspect and fix the node I'll need your workspace ID. You can find it in the Coalesce URL when you're in the workspace: `.../workspaces/{ID}/build/...`"
+
+Store the workspace ID for use in Steps 3 and 5.
 
 ### Step 3: Inspect the Failing Node
 
 **Goal:** Get the full SQL and column transforms for the failing node so you can pinpoint the exact issue.
 
 **Deciding which tool to call:**
-- If you have an `environment_id` from the run → call `mcp__coalesce__get_environment_node` with `environment_id` and `node_id`
-- If you have a `workspace_id` → call `mcp__coalesce__get_workspace_node` with `workspace_id` and `node_id`
-- If neither is known, ask the user for the workspace ID
+- You already have `environment_id` from the `investigate_failure` response in Step 2 — use it directly
+- Call `mcp__coalesce__get_workspace_node` with the `workspace_id` collected in Step 2 and the `node_id` from the failed node
+- Do NOT call `list_environment_nodes` to try to find the node — you already have the `node_id` from `investigate_failure`
 
 **What to look for in the response:**
 - `config.columns[].transform` — the SQL transform expression per column (e.g., `CAST(... AS FLOAT)`)
@@ -169,21 +173,37 @@ Ask the user if they want you to apply the fix.
 **Goal:** Update the workspace node with the corrected SQL.
 
 **Prerequisites:**
-- The `set_node` tool must be available (not hidden by `COALESCE_READONLY_MODE=true`)
-- You need the `workspace_id` — ask the user if not already known
+- The `patch_node_field` tool must be available (not hidden by `COALESCE_READONLY_MODE=true`)
+- You should already have `workspace_id` from Step 2 — if somehow missing, the URL is `.../workspaces/{ID}/build/...`
 
 **Workflow:**
 
-1. Call `mcp__coalesce__get_workspace_node` with `workspace_id` and `node_id` to get the **current full node definition**
-2. Modify the relevant field (e.g., update a column's `transform` value)
-3. Call `mcp__coalesce__set_node` with:
+1. Identify the exact `field_path` to update based on your Step 3 inspection.
+   Paths use the **raw API node shape** (not the slimmed display):
+   - Column transform: `"metadata.columns[N].sources[0].transform"` — find N by counting the column's position (0-based) in the `get_workspace_node` output
+   - WHERE clause: `"config.whereClause"`
+   - Pre/post SQL: `"config.preSQL"` / `"config.postSQL"`
+   - JOIN condition: `"metadata.storageMapping[N].join"`
+
+2. Present a clear before/after diff to the user:
+
+```
+Field:  columns[2].transforms[0]
+Before: CAST(raw_value AS FLOAT)
+After:  TRY_CAST(raw_value AS FLOAT)
+```
+
+3. **⚠️ STOP — wait for explicit user confirmation** ("yes", "apply it", "go ahead") before writing.
+
+4. Once confirmed, call `mcp__coalesce__patch_node_field` with:
    - `workspace_id`
    - `node_id`
-   - `node_config_json` — the **complete** modified node object as a JSON string
+   - `field_path` — the dot/bracket path identified in step 1
+   - `new_value` — the corrected SQL string
 
-**IMPORTANT:** `set_node` does a **full replacement** — you must pass the entire node object, not just the changed fields. Always fetch the current node first.
+5. Report the result to the user. On success, the tool returns `old_value` and `new_value` confirming the change. Remind the user they may need to **re-run the job** to verify the fix.
 
-**If `set_node` is not available** (read-only mode):
+**If `patch_node_field` is not available** (read-only mode):
 
 Tell the user to make the change manually in the Coalesce UI:
 1. Open the node in the workspace
@@ -230,14 +250,20 @@ Tell the user to make the change manually in the Coalesce UI:
 **Params:** `workspace_id` (required), `node_id` (required)
 
 ### mcp__coalesce__set_node (write — may be disabled)
-**When:** Applying a fix to a workspace node. Requires `COALESCE_READONLY_MODE=false`.
+**When:** Applying a full node replacement. Prefer `patch_node_field` for targeted single-field fixes.
 **Params:** `workspace_id` (required), `node_id` (required), `node_config_json` (required — full node object as JSON string)
+
+### mcp__coalesce__patch_node_field (write — may be disabled)
+**When:** Applying a targeted SQL fix to a single field. Preferred over `set_node` for failure remediation — handles fetch-modify-replace internally.
+**Params:** `workspace_id` (required), `node_id` (required), `field_path` (required — e.g. `"columns[0].transforms[0]"`), `new_value` (required)
+**Returns:** `{success, node_name, field_path, old_value, new_value}`
 
 ## Stopping Points
 
 - **Step 1:** If multiple failed runs, ask which to investigate
 - **Step 3:** After presenting the failing SQL, ask if user wants to see the full node
 - **Step 4:** After recommending a fix, wait for user approval before writing
+- **Step 5:** Show before/after diff and require explicit user confirmation before calling `patch_node_field`
 
 ## Troubleshooting
 
@@ -245,5 +271,6 @@ Tell the user to make the change manually in the Coalesce UI:
 |---|---|
 | `investigate_failure` returns no failed nodes | The run may have succeeded or been canceled. Check `run_status` field. Try `get_run_results` for raw data. |
 | Node ID from failure isn't found in environment | The node may have been deleted or renamed since the run. Try `list_environment_nodes` to browse. |
-| `set_node` tool not available | Environment is in read-only mode (`COALESCE_READONLY_MODE=true`). Guide user to make changes in the Coalesce UI. |
-| No `workspace_id` available | Ask the user. It's not included in run metadata — it must be provided separately. |
+| `set_node` or `patch_node_field` tool not available | Environment is in read-only mode (`COALESCE_READONLY_MODE=true`). Guide user to make changes in the Coalesce UI. |
+| `patch_node_field` returns `Invalid field_path` | The path doesn't match the node structure. Call `get_workspace_node` to inspect the actual field names and array indices, then retry with the correct path. |
+| No `workspace_id` available | Ask the user at the end of Step 2, before proceeding. It's not included in run metadata. Tell them to find it in the Coalesce URL: `.../workspaces/{ID}/build/...` |

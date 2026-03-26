@@ -1148,3 +1148,144 @@ async def set_node_tool(
             "node_id": node_id,
             "details": e.response.text if e.response.text else None,
         }, indent=2)
+
+
+def _apply_field_path(node: dict, field_path: str, new_value: str) -> tuple[str, str]:
+    """
+    Apply a targeted field update to a node dict using a dot/bracket path expression.
+
+    Paths must match the RAW API node shape (not the _slim_node display shape):
+      - metadata.columns[N].sources[N].transform  — column-level SQL transform
+      - config.whereClause
+      - config.preSQL / config.postSQL
+      - metadata.storageMapping[N].join
+      - metadata.storageMapping[N].customSQL
+
+    Returns:
+        (old_value, new_value) strings for the diff summary.
+
+    Raises:
+        KeyError / IndexError / ValueError with a descriptive message on bad paths.
+    """
+    import re
+
+    # Tokenize the path: split on "." but keep bracket notation intact
+    # e.g. "columns[0].transforms[1]" → ["columns[0]", "transforms[1]"]
+    tokens = re.split(r'\.(?![^\[]*\])', field_path)
+
+    obj = node
+    parent = None
+    last_key = None
+
+    for token in tokens:
+        # Check for array index: e.g. "columns[0]"
+        array_match = re.fullmatch(r'(\w+)\[(\d+)\]', token)
+        if array_match:
+            key = array_match.group(1)
+            idx = int(array_match.group(2))
+            if key not in obj:
+                raise KeyError(f"Key '{key}' not found in node at path '{field_path}'")
+            arr = obj[key]
+            if not isinstance(arr, list):
+                raise ValueError(f"Expected list at '{key}', got {type(arr).__name__}")
+            if idx >= len(arr):
+                raise IndexError(f"Index {idx} out of range for '{key}' (length {len(arr)})")
+            parent = arr
+            last_key = idx
+            obj = arr[idx]
+        else:
+            if not isinstance(obj, dict) or token not in obj:
+                raise KeyError(f"Key '{token}' not found at path '{field_path}'")
+            parent = obj
+            last_key = token
+            obj = obj[token]
+
+    old_value = str(obj)
+    parent[last_key] = new_value
+    return old_value, new_value
+
+
+async def patch_node_field_tool(
+    workspace_id: str,
+    node_id: str,
+    field_path: str,
+    new_value: str,
+) -> str:
+    """
+    Apply a targeted, surgical update to a single field on a workspace node.
+
+    Handles the full fetch-modify-replace cycle internally so you only need to
+    provide the field to change and its new value — not the entire node JSON.
+
+    Supported field_path expressions (raw API node shape):
+      - "metadata.columns[N].sources[N].transform"  — column-level SQL transform (most common fix)
+      - "config.whereClause"                         — WHERE clause modifier
+      - "config.preSQL" / "config.postSQL"           — pre/post SQL hooks
+      - "metadata.storageMapping[N].join"            — JOIN condition on a source mapping
+      - "metadata.storageMapping[N].customSQL"       — custom SQL on a source mapping
+
+    To find the correct index N: call get_workspace_node first and match the column
+    name in the slimmed output, then use that column's position (0-based) here.
+
+    Use this tool to:
+    - Apply a targeted SQL fix (e.g. CAST → TRY_CAST) to a specific column transform
+    - Update a WHERE clause or JOIN condition
+    - Patch pre/post SQL hooks
+
+    IMPORTANT: Always show the user a before/after diff and get explicit confirmation
+    before calling this tool.
+
+    Args:
+        workspace_id: The workspace ID containing the node
+        node_id: The node ID to update
+        field_path: Dot/bracket path to the field (e.g. "metadata.columns[4].sources[0].transform")
+        new_value: The new value to set at that path (string)
+
+    Returns:
+        JSON object with node_name, field_path, old_value, new_value on success.
+    """
+    client = get_client()
+
+    # Step 1: fetch the full node
+    try:
+        node_data = await client.get_workspace_node(workspace_id, node_id)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to fetch node before patching: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "node_id": node_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+    node_name = node_data.get("name", node_id)
+
+    # Step 2: apply the field mutation
+    try:
+        old_value, applied_value = _apply_field_path(node_data, field_path, new_value)
+    except (KeyError, IndexError, ValueError) as e:
+        return json.dumps({
+            "error": f"Invalid field_path: {e}",
+            "field_path": field_path,
+            "node_name": node_name,
+            "hint": "Supported paths: metadata.columns[N].sources[N].transform, config.whereClause, config.preSQL, config.postSQL, metadata.storageMapping[N].join, metadata.storageMapping[N].customSQL",
+        }, indent=2)
+
+    # Step 3: write the full modified node back
+    try:
+        await client.set_node(workspace_id, node_id, node_data)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to save patched node: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "node_id": node_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+    return json.dumps({
+        "success": True,
+        "node_name": node_name,
+        "node_id": node_id,
+        "field_path": field_path,
+        "old_value": old_value,
+        "new_value": applied_value,
+    }, indent=2)
