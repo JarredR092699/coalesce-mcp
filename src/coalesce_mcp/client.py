@@ -21,8 +21,12 @@ class CoalesceClient:
 
     def __init__(self):
         self.base_url = os.getenv("COALESCE_BASE_URL", "https://app.coalescesoftware.io/api/").rstrip("/") + "/"
+        # Scheduler POST endpoints live at the root host, not under /api/
+        # e.g. https://app.coalescesoftware.io/scheduler/startRun
+        self.scheduler_base_url = self.base_url.split("/api/")[0].rstrip("/") + "/"
         self.token = os.getenv("COALESCE_API_TOKEN", "")
         self._client: httpx.AsyncClient | None = None
+        self._scheduler_client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -37,10 +41,26 @@ class CoalesceClient:
             )
         return self._client
 
+    async def _get_scheduler_client(self) -> httpx.AsyncClient:
+        if self._scheduler_client is None:
+            self._scheduler_client = httpx.AsyncClient(
+                base_url=self.scheduler_base_url,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=30.0,
+            )
+        return self._scheduler_client
+
     async def close(self):
         if self._client:
             await self._client.aclose()
             self._client = None
+        if self._scheduler_client:
+            await self._scheduler_client.aclose()
+            self._scheduler_client = None
 
     # =========================================================================
     # Job Run Endpoints (READ-ONLY)
@@ -161,9 +181,9 @@ class CoalesceClient:
         Returns:
             Run status object
         """
-        client = await self._get_client()
+        client = await self._get_scheduler_client()
 
-        response = await client.get("scheduler/runStatus", params={"runID": run_id})
+        response = await client.get("scheduler/runStatus", params={"runCounter": int(run_id)})
         response.raise_for_status()
 
         if not response.content:
@@ -334,6 +354,88 @@ class CoalesceClient:
             return {}
         return response.json()
 
+    # =========================================================================
+    # Job Run Execution Endpoints (WRITE)
+    # =========================================================================
+
+    async def start_run(
+        self,
+        environment_id: str,
+        job_id: str | None = None,
+        parallelism: int | None = None,
+        user_credentials: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Start a new job run.
+
+        Endpoint: POST /scheduler/startRun
+
+        Args:
+            environment_id: The environment to run
+            job_id: Specific job to run; omit to refresh entire environment
+            parallelism: Optional parallel execution level
+            user_credentials: Snowflake credentials dict (required by Coalesce API).
+                Keys: snowflakeUsername, snowflakePassword, snowflakeWarehouse,
+                      snowflakeRole, snowflakeAuthType
+
+        Returns:
+            Run object with runID and initial status
+        """
+        client = await self._get_scheduler_client()
+        run_details: dict[str, Any] = {"environmentID": environment_id}
+        if job_id is not None:
+            run_details["jobID"] = job_id
+        if parallelism is not None:
+            run_details["parallelism"] = parallelism
+        body: dict[str, Any] = {"runDetails": run_details}
+        if user_credentials:
+            body["userCredentials"] = user_credentials
+        response = await client.post("scheduler/startRun", json=body)
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        return response.json()
+
+    async def retry_run(self, run_id: str) -> dict[str, Any]:
+        """
+        Retry a failed run from the point of failure.
+
+        Endpoint: POST /scheduler/rerun
+
+        Args:
+            run_id: The run ID of the failed run to retry
+
+        Returns:
+            New run object with a new runID
+        """
+        client = await self._get_scheduler_client()
+        response = await client.post("scheduler/rerun", json={"runID": int(run_id)})
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        return response.json()
+
+    async def cancel_run(self, run_id: str, environment_id: str | None = None) -> bool:
+        """
+        Cancel an in-progress run.
+
+        Endpoint: POST /scheduler/cancelRun
+
+        Args:
+            run_id: The run ID to cancel
+            environment_id: The environment ID the run belongs to (required by API)
+
+        Returns:
+            True on success (API returns 204 No Content)
+        """
+        client = await self._get_scheduler_client()
+        body: dict[str, Any] = {"runID": int(run_id)}
+        if environment_id is not None:
+            body["environmentID"] = environment_id
+        response = await client.post("scheduler/cancelRun", json=body)
+        response.raise_for_status()
+        return True
+
 
 # Global client instance
 _client: CoalesceClient | None = None
@@ -454,6 +556,7 @@ async def get_run_status(run_id: str) -> str:
         return json.dumps({
             "error": f"Failed to get run status: {e.response.status_code}",
             "run_id": run_id,
+            "details": e.response.text if e.response.text else None,
         }, indent=2)
 
 
@@ -1326,3 +1429,143 @@ async def patch_node_field_tool(
         "new_value": applied_value,
         "note": "Change written to Coalesce API successfully.",
     }, indent=2)
+
+
+# =============================================================================
+# Run Execution MCP Tool Functions
+# =============================================================================
+
+def _build_user_credentials() -> dict[str, Any] | None:
+    """
+    Build a userCredentials dict from environment variables.
+
+    Required env vars:
+        SNOWFLAKE_USERNAME, SNOWFLAKE_PASSWORD (or SNOWFLAKE_PRIVATE_KEY),
+        SNOWFLAKE_WAREHOUSE, SNOWFLAKE_ROLE
+
+    Returns None if no credentials are configured.
+    """
+    username = os.getenv("SNOWFLAKE_USERNAME")
+    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
+    role = os.getenv("SNOWFLAKE_ROLE")
+    password = os.getenv("SNOWFLAKE_PASSWORD")
+    private_key = os.getenv("SNOWFLAKE_PRIVATE_KEY")
+    private_key_passphrase = os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+
+    if not username or not warehouse:
+        return None
+
+    creds: dict[str, Any] = {
+        "snowflakeUsername": username,
+        "snowflakeWarehouse": warehouse,
+        "snowflakeRole": role or "",
+    }
+    if private_key:
+        creds["snowflakeKeyPairKey"] = private_key
+        creds["snowflakeAuthType"] = "KeyPair"
+        if private_key_passphrase:
+            creds["snowflakeKeyPairPass"] = private_key_passphrase
+    elif password:
+        creds["snowflakePassword"] = password
+        creds["snowflakeAuthType"] = "Basic"
+
+    return creds
+
+
+async def start_run_tool(
+    environment_id: str,
+    job_id: str | None = None,
+    parallelism: int | None = None,
+) -> str:
+    """
+    Start a new job run in Coalesce.
+
+    Args:
+        environment_id: The environment to run
+        job_id: Specific job to run; omit to refresh the entire environment
+        parallelism: Optional parallel execution level
+
+    Returns:
+        JSON with run_id and initial status. Use get_run_status to poll progress.
+    """
+    client = get_client()
+    user_credentials = _build_user_credentials()
+    try:
+        result = await client.start_run(environment_id, job_id=job_id, parallelism=parallelism, user_credentials=user_credentials)
+        run_id = result.get("runID") or result.get("id") or result.get("runCounter")
+        return json.dumps({
+            "success": True,
+            "run_id": run_id,
+            "environment_id": environment_id,
+            "job_id": job_id,
+            "status": result.get("runStatus") or result.get("status"),
+            "note": "Run started. Use get_run_status to poll progress.",
+            "raw": result,
+        }, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to start run: {e.response.status_code}",
+            "environment_id": environment_id,
+            "job_id": job_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def retry_run_tool(run_id: str) -> str:
+    """
+    Retry a failed run from the point of failure.
+
+    Only failed nodes are re-executed — succeeded nodes are not re-run.
+    Use this after patching a node to verify the fix.
+
+    Args:
+        run_id: The run ID of the failed run to retry
+
+    Returns:
+        JSON with new_run_id. Use get_run_status to poll progress.
+    """
+    client = get_client()
+    try:
+        result = await client.retry_run(run_id)
+        new_run_id = result.get("runID") or result.get("id")
+        return json.dumps({
+            "success": True,
+            "original_run_id": run_id,
+            "new_run_id": new_run_id,
+            "status": result.get("runStatus") or result.get("status"),
+            "note": "Retry started. Use get_run_status with new_run_id to poll progress.",
+            "raw": result,
+        }, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to retry run: {e.response.status_code}",
+            "run_id": run_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def cancel_run_tool(run_id: str, environment_id: str | None = None) -> str:
+    """
+    Cancel an in-progress run.
+
+    Args:
+        run_id: The run ID to cancel
+        environment_id: The environment ID the run belongs to
+
+    Returns:
+        JSON confirming cancellation.
+    """
+    client = get_client()
+    try:
+        await client.cancel_run(run_id, environment_id=environment_id)
+        return json.dumps({
+            "success": True,
+            "run_id": run_id,
+            "note": "Run cancellation requested.",
+        }, indent=2)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to cancel run: {e.response.status_code}",
+            "run_id": run_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)

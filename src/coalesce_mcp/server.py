@@ -12,7 +12,7 @@ from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 
 READONLY_MODE = os.getenv("COALESCE_READONLY_MODE", "false").lower() == "true"
-WRITE_TOOLS = {"create_workspace_node", "set_node", "patch_node_field"}
+WRITE_TOOLS = {"create_workspace_node", "set_node", "patch_node_field", "start_run", "retry_run", "cancel_run"}
 
 from coalesce_mcp.client import (
     list_job_runs,
@@ -29,6 +29,9 @@ from coalesce_mcp.client import (
     create_workspace_node_tool,
     set_node_tool,
     patch_node_field_tool,
+    start_run_tool,
+    retry_run_tool,
+    cancel_run_tool,
 )
 
 # Create MCP server instance
@@ -429,6 +432,87 @@ Returns a diff summary: node_name, field_path, old_value, new_value.""",
                 "required": ["workspace_id", "node_id", "field_path", "new_value"],
             },
         ),
+        Tool(
+            name="start_run",
+            description="""Start a new job run in Coalesce.
+
+Use this tool to:
+- Kick off a fresh pipeline run for an environment or specific job
+- Trigger a full environment refresh
+- Run a specific job by job ID
+
+After starting, use get_run_status with the returned run_id to poll progress.
+Returns run_id and initial status.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "environment_id": {
+                        "type": "string",
+                        "description": "The environment ID to run",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Specific job ID to run (optional). Omit to refresh the entire environment.",
+                    },
+                    "parallelism": {
+                        "type": "integer",
+                        "description": "Optional parallel execution level",
+                    },
+                },
+                "required": ["environment_id"],
+            },
+        ),
+        Tool(
+            name="retry_run",
+            description="""Retry a failed job run from the point of failure.
+
+Only the failed nodes are re-executed — nodes that already succeeded are skipped.
+This is the RECOMMENDED tool to verify a fix after patching a node.
+
+Recommended workflow:
+1. investigate_failure → identify root cause
+2. patch_node_field → fix the node
+3. retry_run → verify the fix
+4. get_run_status → poll until complete
+5. get_run_results → confirm all nodes passed
+
+Returns a new run_id for the retry run.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run ID of the failed run to retry",
+                    },
+                },
+                "required": ["run_id"],
+            },
+        ),
+        Tool(
+            name="cancel_run",
+            description="""Cancel an in-progress job run.
+
+Use this tool to:
+- Stop a run that is taking too long
+- Abort a run triggered by mistake
+- Free up resources from a stuck run
+
+Returns confirmation of the cancellation request.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run ID to cancel",
+                    },
+                    "environment_id": {
+                        "type": "string",
+                        "description": "The environment ID the run belongs to",
+                    },
+                },
+                "required": ["run_id"],
+            },
+        ),
     ]
 
     if READONLY_MODE:
@@ -552,6 +636,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not workspace_id or not node_id or not field_path or new_value is None:
             return [TextContent(type="text", text='{"error": "workspace_id, node_id, field_path, and new_value are required"}')]
         result = await patch_node_field_tool(workspace_id, node_id, field_path, new_value)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "start_run":
+        environment_id = arguments.get("environment_id")
+        if not environment_id:
+            return [TextContent(type="text", text='{"error": "environment_id is required"}')]
+        result = await start_run_tool(
+            environment_id,
+            job_id=arguments.get("job_id"),
+            parallelism=arguments.get("parallelism"),
+        )
+        return [TextContent(type="text", text=result)]
+
+    elif name == "retry_run":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return [TextContent(type="text", text='{"error": "run_id is required"}')]
+        result = await retry_run_tool(run_id)
+        return [TextContent(type="text", text=result)]
+
+    elif name == "cancel_run":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return [TextContent(type="text", text='{"error": "run_id is required"}')]
+        result = await cancel_run_tool(run_id, environment_id=arguments.get("environment_id"))
         return [TextContent(type="text", text=result)]
 
     else:
