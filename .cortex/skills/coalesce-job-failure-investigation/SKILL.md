@@ -13,6 +13,9 @@ allowed-tools:
   - mcp__coalesce__get_workspace_node
   - mcp__coalesce__set_node
   - mcp__coalesce__patch_node_field
+  - mcp__coalesce__start_run
+  - mcp__coalesce__retry_run
+  - mcp__coalesce__cancel_run
 ---
 
 # Coalesce Job Failure Investigation
@@ -31,6 +34,8 @@ Step 3: Inspect the failing node's SQL
 Step 4: Recommend a fix
          ↓
 Step 5 (optional): Apply the fix if write access is available
+         ↓
+Step 6 (optional): Verify the fix by re-running the job
 ```
 
 ### Step 1: Find Failed Runs
@@ -211,6 +216,36 @@ Tell the user to make the change manually in the Coalesce UI:
 3. Apply the fix
 4. Deploy and re-run
 
+### Step 6 (Optional): Verify the Fix
+
+**Goal:** Re-run the job to confirm the fix resolves the failure.
+
+**Prerequisites:**
+- Step 5 must be complete (fix applied)
+- `retry_run` tool must be available (not hidden by `COALESCE_READONLY_MODE=true`)
+
+**⚠️ STOP:** Ask the user if they want to re-run before triggering anything.
+
+**Workflow:**
+
+1. Call `mcp__coalesce__retry_run` with the **original failed `run_id`** from Step 1/2.
+   - This re-runs only the previously failed nodes — not a full environment refresh
+   - Do NOT use `start_run` here unless the user explicitly wants a full refresh
+
+2. Note the `new_run_id` from the response.
+
+3. Poll `mcp__coalesce__get_run_status` with `new_run_id` until `runStatus` is `"complete"` or `"failed"`.
+   - Wait a few seconds between polls — don't hammer the API
+   - Tell the user what status you're seeing as you poll
+
+4. Once complete, call `mcp__coalesce__get_run_results` with `new_run_id` to confirm results:
+   - **All nodes passed** (`failed: 0`) → fix is confirmed, tell the user
+   - **Still failing** → report the new error; it may be a different issue or the fix was incomplete
+
+**If the retry itself fails to start:**
+- Check that the original run_id is a valid failed run (not canceled or still running)
+- If `retry_run` is unavailable, suggest `start_run` with the same `environment_id` and `job_id` as a fallback
+
 ## Tools Reference
 
 ### mcp__coalesce__list_failed_runs
@@ -258,12 +293,28 @@ Tell the user to make the change manually in the Coalesce UI:
 **Params:** `workspace_id` (required), `node_id` (required), `field_path` (required — e.g. `"columns[0].transforms[0]"`), `new_value` (required)
 **Returns:** `{success, node_name, field_path, old_value, new_value}`
 
+### mcp__coalesce__retry_run (write — may be disabled)
+**When:** After applying a fix — re-runs only the previously failed nodes from a prior run. **The primary tool for Step 6 verification.**
+**Params:** `run_id` (required — the original failed run ID)
+**Returns:** `{success, original_run_id, new_run_id}` — use `new_run_id` to poll status
+
+### mcp__coalesce__start_run (write — may be disabled)
+**When:** Triggering a fresh full-environment refresh (not a retry). Use this if the user wants to run the whole job from scratch rather than retry only failed nodes.
+**Params:** `environment_id` (required), `job_id` (optional), `parallelism` (optional)
+**Returns:** `{success, run_id}` — use `run_id` to poll status
+
+### mcp__coalesce__cancel_run (write — may be disabled)
+**When:** Aborting a run that is taking too long, was triggered by mistake, or needs to be stopped before completion.
+**Params:** `run_id` (required), `environment_id` (optional)
+**Returns:** `{success, run_id}`
+
 ## Stopping Points
 
 - **Step 1:** If multiple failed runs, ask which to investigate
 - **Step 3:** After presenting the failing SQL, ask if user wants to see the full node
 - **Step 4:** After recommending a fix, wait for user approval before writing
 - **Step 5:** Show before/after diff and require explicit user confirmation before calling `patch_node_field`
+- **Step 6:** Ask the user if they want to re-run before calling `retry_run` — do not trigger a run automatically
 
 ## Troubleshooting
 
