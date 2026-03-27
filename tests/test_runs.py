@@ -559,6 +559,144 @@ class TestGetRun:
         assert parsed is not None
 
 
+# ---------------------------------------------------------------------------
+# Unit tests: _apply_field_path
+# ---------------------------------------------------------------------------
+
+class TestApplyFieldPath:
+    """Test targeted field path updates on node dicts."""
+
+    def test_modify_existing_field(self):
+        from coalesce_mcp.client import _apply_field_path
+        node = {"metadata": {"columns": [{"name": "COL_A", "isBusinessKey": False}]}}
+        old, new = _apply_field_path(node, "metadata.columns[0].isBusinessKey", "true")
+        assert old == "False"
+        assert new == "True"
+        assert node["metadata"]["columns"][0]["isBusinessKey"] is True
+
+    def test_create_new_field_on_final_segment(self):
+        from coalesce_mcp.client import _apply_field_path
+        node = {"metadata": {"columns": [{"name": "COL_A", "dataType": "VARCHAR"}]}}
+        # isBusinessKey does not exist yet — should be created
+        old, new = _apply_field_path(node, "metadata.columns[0].isBusinessKey", "true")
+        assert old == "null"
+        assert new == "True"
+        assert node["metadata"]["columns"][0]["isBusinessKey"] is True
+
+    def test_missing_intermediate_key_raises(self):
+        from coalesce_mcp.client import _apply_field_path
+        node = {"metadata": {}}
+        with pytest.raises(KeyError, match="columns"):
+            _apply_field_path(node, "metadata.columns[0].isBusinessKey", "true")
+
+    def test_boolean_false_coercion(self):
+        from coalesce_mcp.client import _apply_field_path
+        node = {"metadata": {"columns": [{"name": "COL_A", "isBusinessKey": True}]}}
+        old, new = _apply_field_path(node, "metadata.columns[0].isBusinessKey", "false")
+        assert old == "True"
+        assert new == "False"
+        assert node["metadata"]["columns"][0]["isBusinessKey"] is False
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: patch_node_field_tool
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestPatchNodeFieldTool:
+    """Test that patch_node_field_tool handles the table property and field creation."""
+
+    async def test_adds_table_property_when_missing(self):
+        from coalesce_mcp.client import patch_node_field_tool
+        # Raw node without 'table' property
+        raw_node = {
+            "id": "node-1",
+            "name": "DIM_TEST",
+            "nodeType": "Dimension",
+            "locationName": "SRC",
+            "metadata": {
+                "columns": [{"name": "COL_A", "isBusinessKey": False}],
+            },
+        }
+        captured_put = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200, content=json.dumps(raw_node).encode(),
+                                     headers={"content-type": "application/json"})
+            elif request.method == "PUT":
+                captured_put["body"] = json.loads(request.content)
+                return httpx.Response(200, content=json.dumps(raw_node).encode(),
+                                     headers={"content-type": "application/json"})
+            return httpx.Response(404)
+
+        client = CoalesceClient()
+        client._client = httpx.AsyncClient(
+            base_url="https://app.coalescesoftware.io/api/",
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer test"},
+        )
+        import coalesce_mcp.client as mod
+        orig = mod._client
+        mod._client = client
+        try:
+            result = await patch_node_field_tool("21", "node-1",
+                                                  "metadata.columns[0].isBusinessKey", "true")
+        finally:
+            mod._client = orig
+
+        parsed = json.loads(result)
+        assert parsed.get("success") is True
+        # Verify the PUT body included 'table'
+        assert captured_put["body"]["table"] == "DIM_TEST"
+        # Verify the field was set
+        assert captured_put["body"]["metadata"]["columns"][0]["isBusinessKey"] is True
+
+    async def test_preserves_existing_table_property(self):
+        from coalesce_mcp.client import patch_node_field_tool
+        raw_node = {
+            "id": "node-1",
+            "name": "DIM_TEST",
+            "table": "CUSTOM_TABLE_NAME",
+            "nodeType": "Dimension",
+            "locationName": "SRC",
+            "metadata": {
+                "columns": [{"name": "COL_A", "isBusinessKey": False}],
+            },
+        }
+        captured_put = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200, content=json.dumps(raw_node).encode(),
+                                     headers={"content-type": "application/json"})
+            elif request.method == "PUT":
+                captured_put["body"] = json.loads(request.content)
+                return httpx.Response(200, content=json.dumps(raw_node).encode(),
+                                     headers={"content-type": "application/json"})
+            return httpx.Response(404)
+
+        client = CoalesceClient()
+        client._client = httpx.AsyncClient(
+            base_url="https://app.coalescesoftware.io/api/",
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer test"},
+        )
+        import coalesce_mcp.client as mod
+        orig = mod._client
+        mod._client = client
+        try:
+            result = await patch_node_field_tool("21", "node-1",
+                                                  "metadata.columns[0].isBusinessKey", "true")
+        finally:
+            mod._client = orig
+
+        parsed = json.loads(result)
+        assert parsed.get("success") is True
+        # Should NOT overwrite existing table value
+        assert captured_put["body"]["table"] == "CUSTOM_TABLE_NAME"
+
+
 @pytest.mark.asyncio
 class TestNodeManagementEmptyBodies:
     """Test that node management methods handle empty response bodies gracefully."""
