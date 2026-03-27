@@ -21,8 +21,12 @@ class CoalesceClient:
 
     def __init__(self):
         self.base_url = os.getenv("COALESCE_BASE_URL", "https://app.coalescesoftware.io/api/").rstrip("/") + "/"
+        # Scheduler POST endpoints live at the root host, not under /api/
+        # e.g. https://app.coalescesoftware.io/scheduler/startRun
+        self.scheduler_base_url = self.base_url.split("/api/")[0].rstrip("/") + "/"
         self.token = os.getenv("COALESCE_API_TOKEN", "")
         self._client: httpx.AsyncClient | None = None
+        self._scheduler_client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -37,10 +41,26 @@ class CoalesceClient:
             )
         return self._client
 
+    async def _get_scheduler_client(self) -> httpx.AsyncClient:
+        if self._scheduler_client is None:
+            self._scheduler_client = httpx.AsyncClient(
+                base_url=self.scheduler_base_url,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=30.0,
+            )
+        return self._scheduler_client
+
     async def close(self):
         if self._client:
             await self._client.aclose()
             self._client = None
+        if self._scheduler_client:
+            await self._scheduler_client.aclose()
+            self._scheduler_client = None
 
     # =========================================================================
     # Job Run Endpoints (READ-ONLY)
@@ -357,13 +377,13 @@ class CoalesceClient:
         Returns:
             Run object with runID and initial status
         """
-        client = await self._get_client()
-        body: dict[str, Any] = {"environmentID": environment_id}
+        client = await self._get_scheduler_client()
+        run_details: dict[str, Any] = {"environmentID": environment_id}
         if job_id is not None:
-            body["jobID"] = job_id
+            run_details["jobID"] = job_id
         if parallelism is not None:
-            body["parallelism"] = parallelism
-        response = await client.post("scheduler/startRun", json=body)
+            run_details["parallelism"] = parallelism
+        response = await client.post("scheduler/startRun", json={"runDetails": run_details})
         response.raise_for_status()
         if not response.content:
             return {}
@@ -381,7 +401,7 @@ class CoalesceClient:
         Returns:
             New run object with a new runID
         """
-        client = await self._get_client()
+        client = await self._get_scheduler_client()
         response = await client.post("scheduler/rerun", json={"runID": run_id})
         response.raise_for_status()
         if not response.content:
@@ -400,7 +420,7 @@ class CoalesceClient:
         Returns:
             True on success (API returns 204 No Content)
         """
-        client = await self._get_client()
+        client = await self._get_scheduler_client()
         response = await client.post("scheduler/cancelRun", json={"runID": run_id})
         response.raise_for_status()
         return True
