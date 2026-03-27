@@ -505,6 +505,10 @@ Returns confirmation of the cancellation request.""",
                         "type": "string",
                         "description": "The run ID to cancel",
                     },
+                    "environment_id": {
+                        "type": "string",
+                        "description": "The environment ID the run belongs to",
+                    },
                 },
                 "required": ["run_id"],
             },
@@ -656,7 +660,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         run_id = arguments.get("run_id")
         if not run_id:
             return [TextContent(type="text", text='{"error": "run_id is required"}')]
-        result = await cancel_run_tool(run_id)
+        result = await cancel_run_tool(run_id, environment_id=arguments.get("environment_id"))
         return [TextContent(type="text", text=result)]
 
     else:

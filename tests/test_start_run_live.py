@@ -72,6 +72,12 @@ async def main():
     run_id = result.get("run_id")
     print(f"\nRun started. run_id = {run_id}")
 
+    # Diagnostic: show exact URL being called
+    from coalesce_mcp.client import get_client as _get_client_fn
+    _c = _get_client_fn()
+    print(f"[DEBUG] scheduler_base_url = {_c.scheduler_base_url}")
+    print(f"[DEBUG] get_run_status will call: {_c.scheduler_base_url}scheduler/runStatus?runID={run_id}")
+
     # -------------------------------------------------------------------------
     # Test 2: get_run_status (verify the run is actually running)
     # -------------------------------------------------------------------------
@@ -84,7 +90,7 @@ async def main():
     # Test 3: cancel_run (stop it immediately so we don't burn credits)
     # -------------------------------------------------------------------------
     print(f"\n--- Test 3: cancel_run (run_id={run_id}) ---")
-    cancel_json = await cancel_run_tool(str(run_id))
+    cancel_json = await cancel_run_tool(str(run_id), environment_id=environment_id)
     cancel = json.loads(cancel_json)
     print(json.dumps(cancel, indent=2))
 

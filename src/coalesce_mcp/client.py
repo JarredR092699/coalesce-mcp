@@ -181,9 +181,9 @@ class CoalesceClient:
         Returns:
             Run status object
         """
-        client = await self._get_client()
+        client = await self._get_scheduler_client()
 
-        response = await client.get("scheduler/runStatus", params={"runID": run_id})
+        response = await client.get("scheduler/runStatus", params={"runCounter": int(run_id)})
         response.raise_for_status()
 
         if not response.content:
@@ -409,13 +409,13 @@ class CoalesceClient:
             New run object with a new runID
         """
         client = await self._get_scheduler_client()
-        response = await client.post("scheduler/rerun", json={"runID": run_id})
+        response = await client.post("scheduler/rerun", json={"runID": int(run_id)})
         response.raise_for_status()
         if not response.content:
             return {}
         return response.json()
 
-    async def cancel_run(self, run_id: str) -> bool:
+    async def cancel_run(self, run_id: str, environment_id: str | None = None) -> bool:
         """
         Cancel an in-progress run.
 
@@ -423,12 +423,16 @@ class CoalesceClient:
 
         Args:
             run_id: The run ID to cancel
+            environment_id: The environment ID the run belongs to (required by API)
 
         Returns:
             True on success (API returns 204 No Content)
         """
         client = await self._get_scheduler_client()
-        response = await client.post("scheduler/cancelRun", json={"runID": run_id})
+        body: dict[str, Any] = {"runID": int(run_id)}
+        if environment_id is not None:
+            body["environmentID"] = environment_id
+        response = await client.post("scheduler/cancelRun", json=body)
         response.raise_for_status()
         return True
 
@@ -552,6 +556,7 @@ async def get_run_status(run_id: str) -> str:
         return json.dumps({
             "error": f"Failed to get run status: {e.response.status_code}",
             "run_id": run_id,
+            "details": e.response.text if e.response.text else None,
         }, indent=2)
 
 
@@ -1487,7 +1492,7 @@ async def start_run_tool(
     user_credentials = _build_user_credentials()
     try:
         result = await client.start_run(environment_id, job_id=job_id, parallelism=parallelism, user_credentials=user_credentials)
-        run_id = result.get("runID") or result.get("id")
+        run_id = result.get("runID") or result.get("id") or result.get("runCounter")
         return json.dumps({
             "success": True,
             "run_id": run_id,
@@ -1539,19 +1544,20 @@ async def retry_run_tool(run_id: str) -> str:
         }, indent=2)
 
 
-async def cancel_run_tool(run_id: str) -> str:
+async def cancel_run_tool(run_id: str, environment_id: str | None = None) -> str:
     """
     Cancel an in-progress run.
 
     Args:
         run_id: The run ID to cancel
+        environment_id: The environment ID the run belongs to
 
     Returns:
         JSON confirming cancellation.
     """
     client = get_client()
     try:
-        await client.cancel_run(run_id)
+        await client.cancel_run(run_id, environment_id=environment_id)
         return json.dumps({
             "success": True,
             "run_id": run_id,
