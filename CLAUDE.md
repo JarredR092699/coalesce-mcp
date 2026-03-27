@@ -52,7 +52,7 @@ Python 3.10+ required. Key deps: `mcp>=1.0.0`, `httpx>=0.27.0`.
 |---|---|---|
 | `COALESCE_API_TOKEN` | (required) | Bearer token — set in `.env` or directly in the MCP host config |
 | `COALESCE_BASE_URL` | `https://app.coalescesoftware.io/api` | Override for on-prem |
-| `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node` and `set_node` tools |
+| `COALESCE_READONLY_MODE` | `false` | Set `true` to hide `create_workspace_node`, `set_node`, `patch_node_field`, `start_run`, `retry_run`, and `cancel_run` tools |
 
 `COALESCE_READONLY_MODE` is used in the Snowflake Cortex CLI integration — the agent has a `DATAENG_READ_ONLY` Snowflake role and the readonly mode prevents write tool exposure.
 
@@ -89,6 +89,13 @@ All calls go to `COALESCE_BASE_URL`. Auth is `Authorization: Bearer <token>`.
 | GET | `/scheduler/runStatus?runID={id}` | Live status (different base path than run details) |
 | GET | `/v1/runs/{runID}/results` | Node-level execution results — flat dict keyed by node ID |
 
+### Job Run Execution (write)
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/scheduler/startRun` | Start a new run; body: `environmentID` (required), `jobID`, `parallelism` (optional) |
+| POST | `/scheduler/rerun` | Retry a failed run from failure point; body: `runID` |
+| POST | `/scheduler/cancelRun` | Cancel an in-progress run; body: `runID`; returns 204 No Content |
+
 ### Node Management (read + write)
 | Method | Path | Purpose |
 |---|---|---|
@@ -107,6 +114,9 @@ All calls go to `COALESCE_BASE_URL`. Auth is `Authorization: Bearer <token>`.
 |---|---|
 | `list_job_runs` | List runs with optional filters |
 | `list_failed_runs` | Shortcut: failed runs only |
+| `start_run` | Start a fresh job run (environment or specific job) |
+| `retry_run` | Re-run only failed nodes from a prior run — use after patching to verify fix |
+| `cancel_run` | Abort an in-progress run |
 | `get_run` | Full run object |
 | `get_run_status` | Live status via scheduler endpoint |
 | `get_run_results` | Pre-processed: failed nodes + blocked downstream + summary stats |
@@ -122,10 +132,14 @@ All calls go to `COALESCE_BASE_URL`. Auth is `Authorization: Bearer <token>`.
 | `set_node` | Full replacement update (read current first!) |
 | `patch_node_field` | Surgical single-field update (handles fetch-modify-replace internally) |
 
-**Recommended investigation flow:**
+**Recommended investigation + fix flow:**
 1. `list_failed_runs` → find run_id
 2. `investigate_failure` → root cause + downstream impact
 3. `get_workspace_node` → inspect SQL of failing node
+4. `patch_node_field` → apply the fix
+5. `retry_run` → re-run only failed nodes to verify the fix
+6. `get_run_status` → poll until complete
+7. `get_run_results` → confirm all nodes passed
 
 ---
 
