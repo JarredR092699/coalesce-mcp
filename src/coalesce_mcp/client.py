@@ -363,6 +363,7 @@ class CoalesceClient:
         environment_id: str,
         job_id: str | None = None,
         parallelism: int | None = None,
+        user_credentials: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Start a new job run.
@@ -373,6 +374,9 @@ class CoalesceClient:
             environment_id: The environment to run
             job_id: Specific job to run; omit to refresh entire environment
             parallelism: Optional parallel execution level
+            user_credentials: Snowflake credentials dict (required by Coalesce API).
+                Keys: snowflakeUsername, snowflakePassword, snowflakeWarehouse,
+                      snowflakeRole, snowflakeAuthType
 
         Returns:
             Run object with runID and initial status
@@ -383,7 +387,10 @@ class CoalesceClient:
             run_details["jobID"] = job_id
         if parallelism is not None:
             run_details["parallelism"] = parallelism
-        response = await client.post("scheduler/startRun", json={"runDetails": run_details})
+        body: dict[str, Any] = {"runDetails": run_details}
+        if user_credentials:
+            body["userCredentials"] = user_credentials
+        response = await client.post("scheduler/startRun", json=body)
         response.raise_for_status()
         if not response.content:
             return {}
@@ -1423,6 +1430,43 @@ async def patch_node_field_tool(
 # Run Execution MCP Tool Functions
 # =============================================================================
 
+def _build_user_credentials() -> dict[str, Any] | None:
+    """
+    Build a userCredentials dict from environment variables.
+
+    Required env vars:
+        SNOWFLAKE_USERNAME, SNOWFLAKE_PASSWORD (or SNOWFLAKE_PRIVATE_KEY),
+        SNOWFLAKE_WAREHOUSE, SNOWFLAKE_ROLE
+
+    Returns None if no credentials are configured.
+    """
+    username = os.getenv("SNOWFLAKE_USERNAME")
+    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
+    role = os.getenv("SNOWFLAKE_ROLE")
+    password = os.getenv("SNOWFLAKE_PASSWORD")
+    private_key = os.getenv("SNOWFLAKE_PRIVATE_KEY")
+    private_key_passphrase = os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+
+    if not username or not warehouse:
+        return None
+
+    creds: dict[str, Any] = {
+        "snowflakeUsername": username,
+        "snowflakeWarehouse": warehouse,
+        "snowflakeRole": role or "",
+    }
+    if private_key:
+        creds["snowflakeKeyPairKey"] = private_key
+        creds["snowflakeAuthType"] = "KeyPair"
+        if private_key_passphrase:
+            creds["snowflakeKeyPairPass"] = private_key_passphrase
+    elif password:
+        creds["snowflakePassword"] = password
+        creds["snowflakeAuthType"] = "Basic"
+
+    return creds
+
+
 async def start_run_tool(
     environment_id: str,
     job_id: str | None = None,
@@ -1440,8 +1484,9 @@ async def start_run_tool(
         JSON with run_id and initial status. Use get_run_status to poll progress.
     """
     client = get_client()
+    user_credentials = _build_user_credentials()
     try:
-        result = await client.start_run(environment_id, job_id=job_id, parallelism=parallelism)
+        result = await client.start_run(environment_id, job_id=job_id, parallelism=parallelism, user_credentials=user_credentials)
         run_id = result.get("runID") or result.get("id")
         return json.dumps({
             "success": True,

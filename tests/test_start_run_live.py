@@ -37,13 +37,24 @@ async def main():
         sys.exit(1)
 
     # Import here so env vars are set first
-    from coalesce_mcp.client import start_run_tool, retry_run_tool, cancel_run_tool, get_run_status
+    from coalesce_mcp.client import start_run_tool, retry_run_tool, cancel_run_tool, get_run_status, _build_user_credentials
 
     print("=" * 60)
     print("Coalesce Live API Test — start_run / retry_run / cancel_run")
     print("=" * 60)
     print(f"Environment ID : {environment_id}")
     print(f"Job ID         : {job_id or '(none — full env refresh)'}")
+
+    creds = _build_user_credentials()
+    if creds:
+        print(f"Snowflake user : {creds.get('snowflakeUsername')}")
+        print(f"Warehouse      : {creds.get('snowflakeWarehouse')}")
+        print(f"Role           : {creds.get('snowflakeRole') or '(default)'}")
+        print(f"Auth type      : {creds.get('snowflakeAuthType')}")
+    else:
+        print("WARNING: No Snowflake credentials found in .env")
+        print("Set SNOWFLAKE_USERNAME, SNOWFLAKE_PASSWORD, SNOWFLAKE_WAREHOUSE, SNOWFLAKE_ROLE")
+        sys.exit(1)
     print()
 
     # -------------------------------------------------------------------------
