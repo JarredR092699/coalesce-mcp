@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An MCP (Model Context Protocol) server that gives Claude read/write access to [Coalesce](https://coalesce.io) — a Snowflake-native data transformation platform. The primary use case is **failure investigation**: ask Claude to diagnose why a pipeline run failed without leaving the chat.
 
-**Package name:** `coalesce-mcp` | **PyPI:** `pip install coalesce-mcp` | **Version:** 0.2.0
+**Package name:** `coalesce-mcp` | **PyPI:** `pip install coalesce-mcp` | **Version:** 0.3.0
 
 ---
 
@@ -120,6 +120,7 @@ All calls go to `COALESCE_BASE_URL`. Auth is `Authorization: Bearer <token>`.
 | `get_workspace_node` / `get_environment_node` | Full node config + SQL |
 | `create_workspace_node` | Create with defaults |
 | `set_node` | Full replacement update (read current first!) |
+| `patch_node_field` | Surgical single-field update (handles fetch-modify-replace internally) |
 
 **Recommended investigation flow:**
 1. `list_failed_runs` → find run_id
@@ -179,6 +180,30 @@ Some results include `predecessorNodeIDs`/`predecessors` fields enabling exact d
 3. ~~**Failed nodes leaking into `downstream_blocked_nodes`**~~ — **Fixed (2026-03-20).** `all_blocked_ids` now excludes `failed_ids`.
 
 4. ~~**Double `/api/api/` in URL**~~ — **Fixed.** `base_url` always ends with `/` and all request paths are relative (no leading slash).
+
+5. ~~**`patch_node_field` 400 error: `isBusinessKey must be boolean` + `table required`**~~ — **Fixed (2026-03-26).** Two root causes: (a) `_apply_field_path` always wrote `new_value` as a string — fixed with coercion: `"true"`→`True`, `"false"`→`False`, numeric strings→`int`. (b) Coalesce PUT API requires a `table` property absent from GET responses — `patch_node_field_tool` now injects `node_data["table"] = node_data["name"]` when missing before the PUT.
+
+6. ~~**`isBusinessKey` invisible to LLM**~~ — **Fixed (2026-03-26).** `_slim_node()` stripped all key flags from column output. Now includes `isBusinessKey` and `isSurrogateKey` in slim output when truthy, so the LLM can see current key state and construct correct `patch_node_field` paths.
+
+7. ~~**Cortex confusion loop — `"new_value": "False"` (string in success JSON)**~~ — **Fixed (2026-03-26).** Even after a successful API write, the success response returned the coerced value as `str(coerced)`. Cortex read `"new_value": "False"` (a JSON string), concluded boolean coercion had failed, and kept retrying. Fixed by returning the coerced Python value directly (serializes as JSON `false`) and adding `"note": "Change written to Coalesce API successfully."` to make success unambiguous.
+
+---
+
+## Deployment Notes (Cortex CLI)
+
+The Cortex CLI binary at `~/.local/bin/coalesce-mcp-server` is managed by `uv tool install`, which creates its own isolated venv at `~/.local/share/uv/tools/coalesce-mcp/`. A plain `pip install` or `uv sync` will **not** update this binary.
+
+**Full deploy cycle after code changes:**
+```bash
+uv build
+uv tool install --force dist/coalesce_mcp-<version>-py3-none-any.whl
+# then restart Cortex Code
+```
+
+**Verify the right code is installed:**
+```bash
+grep -n "coerced\|new_value.lower" ~/.local/share/uv/tools/coalesce-mcp/lib/python3.12/site-packages/coalesce_mcp/client.py
+```
 
 ---
 

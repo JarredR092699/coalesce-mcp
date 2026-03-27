@@ -388,10 +388,14 @@ provide the path to the field you want to change and its new value.
 
 Supported field_path expressions (raw API node shape):
 - "metadata.columns[N].sources[N].transform"  — column-level SQL transform (most common fix)
+- "metadata.columns[N].isBusinessKey"          — set/unset business key ("true" or "false")
+- "metadata.columns[N].isSurrogateKey"         — set/unset surrogate key ("true" or "false")
 - "config.whereClause"                         — WHERE clause modifier
 - "config.preSQL" / "config.postSQL"           — pre/post SQL hooks
 - "metadata.storageMapping[N].join"            — JOIN condition on a source mapping
 - "metadata.storageMapping[N].customSQL"       — custom SQL on a source mapping
+
+Boolean values ("true"/"false") are automatically coerced to JSON booleans.
 
 Use this tool to:
 - Apply a targeted SQL fix (e.g. CAST → TRY_CAST) to a single column transform

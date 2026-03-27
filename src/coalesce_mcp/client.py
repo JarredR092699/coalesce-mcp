@@ -947,6 +947,10 @@ def _slim_node(node: dict) -> dict:
         }
         if col.get("nullable") is False:
             entry["nullable"] = False
+        if col.get("isBusinessKey"):
+            entry["isBusinessKey"] = True
+        if col.get("isSurrogateKey"):
+            entry["isSurrogateKey"] = True
         if transforms:
             entry["transforms"] = transforms
         slim_columns.append(entry)
@@ -1177,7 +1181,8 @@ def _apply_field_path(node: dict, field_path: str, new_value: str) -> tuple[str,
     parent = None
     last_key = None
 
-    for token in tokens:
+    for i, token in enumerate(tokens):
+        is_last = (i == len(tokens) - 1)
         # Check for array index: e.g. "columns[0]"
         array_match = re.fullmatch(r'(\w+)\[(\d+)\]', token)
         if array_match:
@@ -1194,15 +1199,35 @@ def _apply_field_path(node: dict, field_path: str, new_value: str) -> tuple[str,
             last_key = idx
             obj = arr[idx]
         else:
-            if not isinstance(obj, dict) or token not in obj:
+            if not isinstance(obj, dict):
+                raise KeyError(f"Key '{token}' not found at path '{field_path}'")
+            if token not in obj:
+                if is_last:
+                    # Allow creating new fields on the final segment (e.g. isBusinessKey)
+                    parent = obj
+                    last_key = token
+                    obj = None
+                    break
                 raise KeyError(f"Key '{token}' not found at path '{field_path}'")
             parent = obj
             last_key = token
             obj = obj[token]
 
-    old_value = str(obj)
-    parent[last_key] = new_value
-    return old_value, new_value
+    old_value = str(obj) if obj is not None else "null"
+    # Coerce boolean/int strings so JSON booleans round-trip correctly
+    coerced: Any = new_value
+    if isinstance(new_value, str):
+        if new_value.lower() == "true":
+            coerced = True
+        elif new_value.lower() == "false":
+            coerced = False
+        else:
+            try:
+                coerced = int(new_value)
+            except ValueError:
+                pass
+    parent[last_key] = coerced
+    return old_value, coerced
 
 
 async def patch_node_field_tool(
@@ -1219,13 +1244,18 @@ async def patch_node_field_tool(
 
     Supported field_path expressions (raw API node shape):
       - "metadata.columns[N].sources[N].transform"  — column-level SQL transform (most common fix)
+      - "metadata.columns[N].isBusinessKey"          — set/unset business key (use "true" or "false")
+      - "metadata.columns[N].isSurrogateKey"         — set/unset surrogate key (use "true" or "false")
       - "config.whereClause"                         — WHERE clause modifier
       - "config.preSQL" / "config.postSQL"           — pre/post SQL hooks
       - "metadata.storageMapping[N].join"            — JOIN condition on a source mapping
       - "metadata.storageMapping[N].customSQL"       — custom SQL on a source mapping
 
+    Boolean values ("true"/"false") are automatically coerced to JSON booleans.
+
     To find the correct index N: call get_workspace_node first and match the column
-    name in the slimmed output, then use that column's position (0-based) here.
+    name in the slimmed output (isBusinessKey/isSurrogateKey are shown when set),
+    then use that column's position (0-based) here.
 
     Use this tool to:
     - Apply a targeted SQL fix (e.g. CAST → TRY_CAST) to a specific column transform
@@ -1267,10 +1297,16 @@ async def patch_node_field_tool(
             "error": f"Invalid field_path: {e}",
             "field_path": field_path,
             "node_name": node_name,
-            "hint": "Supported paths: metadata.columns[N].sources[N].transform, config.whereClause, config.preSQL, config.postSQL, metadata.storageMapping[N].join, metadata.storageMapping[N].customSQL",
+            "hint": "Supported paths: metadata.columns[N].sources[N].transform, metadata.columns[N].isBusinessKey, metadata.columns[N].isSurrogateKey, config.whereClause, config.preSQL, config.postSQL, metadata.storageMapping[N].join, metadata.storageMapping[N].customSQL",
         }, indent=2)
 
-    # Step 3: write the full modified node back
+    # Step 3: ensure required PUT fields exist
+    # The Coalesce PUT API requires a 'table' property that may not be
+    # present in the GET response. Default to the node name if missing.
+    if "table" not in node_data:
+        node_data["table"] = node_data.get("name", "")
+
+    # Step 4: write the full modified node back
     try:
         await client.set_node(workspace_id, node_id, node_data)
     except httpx.HTTPStatusError as e:
@@ -1288,4 +1324,5 @@ async def patch_node_field_tool(
         "field_path": field_path,
         "old_value": old_value,
         "new_value": applied_value,
+        "note": "Change written to Coalesce API successfully.",
     }, indent=2)
