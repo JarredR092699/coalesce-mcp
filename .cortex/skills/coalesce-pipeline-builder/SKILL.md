@@ -79,7 +79,7 @@ Look for:
 Pick one Stage node from the list and call `mcp__coalesce__get_workspace_node`. This reveals:
 - The column structure and how transforms are applied
 - The `locationName` (schema) used in this workspace — you'll need this when creating new nodes
-- The `storageMapping` shape for JOIN patterns
+- The `sourceMapping` shape for JOIN patterns (note: the raw API uses `sourceMapping`, not `storageMapping`)
 
 **2c. Inspect an existing Dimension node (if creating a Dimension):**
 
@@ -169,7 +169,7 @@ Save the returned `node_id` as `dim_node_id` (or `fact_node_id`, etc.).
 
 **⚠️ If the user asked for a star schema (one Fact + multiple Dimensions), follow this section instead of proceeding directly to Step 6.**
 
-A star schema requires that **every dimension is fully built and configured before the Fact node is created.** The Fact node must list all dimension Stage nodes as predecessors so it can reference their surrogate keys.
+A star schema requires that **every dimension is fully built and configured before the Fact node is created.** The Fact node must list the fact Stage node plus all **Dimension nodes** as predecessors so it can reference their surrogate keys.
 
 **The key principle:** Each Dimension node auto-generates a surrogate key column (e.g. `DIM_CUSTOMER_KEY`). The Fact table must carry a foreign key column for each dimension that matches this surrogate key — this is how the tables join at query time.
 
@@ -183,7 +183,7 @@ For each entity (customer, product, date, etc.):
 
 After ALL dimensions are built:
   4. Create the Fact Stage node (sourced from the fact source table)
-  5. Create the Fact node with predecessor_node_ids = [fact_stage_id, dim1_stage_id, dim2_stage_id, ...]
+  5. Create the Fact node with predecessor_node_ids = [fact_stage_id, dim1_node_id, dim2_node_id, ...]
   6. Add foreign key columns to the Fact node for each dimension
   7. Configure JOIN conditions on the Fact node to link each dimension
 ```
@@ -199,15 +199,15 @@ DIM_PRODUCT   → surrogate key: DIM_PRODUCT_KEY   ← matched by: PRODUCT_ID (o
 DIM_DATE      → surrogate key: DIM_DATE_KEY       ← matched by: ORDER_DATE (on fact source)
 ```
 
-**5b-ii. Create the Fact node with all dimension stages as predecessors:**
+**5b-ii. Create the Fact node with the fact Stage plus all Dimension nodes as predecessors:**
 
-When creating the Fact node, include the Fact Stage AND every Dimension Stage node as predecessors:
+When creating the Fact node, include the Fact Stage AND every **Dimension node** (not Stage) as predecessors:
 
 ```
-predecessor_node_ids: [fact_stage_id, dim_customer_stage_id, dim_product_stage_id, dim_date_stage_id]
+predecessor_node_ids: [fact_stage_id, dim_customer_node_id, dim_product_node_id, dim_date_node_id]
 ```
 
-This wires the Fact node to pull columns from all sources.
+This wires the Fact node to pull columns from the fact's own stage (for measures/natural keys) and from each Dimension node (for surrogate keys).
 
 **5b-iii. Add foreign key columns to the Fact node:**
 
@@ -223,26 +223,28 @@ Example — adding a customer foreign key column:
 
 **5b-iv. Configure JOIN conditions on the Fact node:**
 
-For each dimension predecessor, set the JOIN ON condition in `storageMapping`. This tells Coalesce how to join the dimension to the fact.
+For each dimension predecessor, set the JOIN ON condition in `sourceMapping`. This tells Coalesce how to join the dimension to the fact.
 
-Inspect an existing Fact node first (`mcp__coalesce__get_workspace_node`) to see how `storageMapping` is structured in this workspace. Then for each dimension:
+**IMPORTANT — correct `patch_node_field` path:** The raw API uses `sourceMapping` (not `storageMapping`), and `join` is an object with a `joinCondition` property. The correct field path is:
 
-- `field_path`: `"metadata.storageMapping[N].join"`
-- `new_value`: `"FACT_STAGE"."CUSTOMER_ID" = "DIM_CUSTOMER"."DIM_CUSTOMER_KEY"`
+- `field_path`: `"metadata.sourceMapping[N].join.joinCondition"`
+- `new_value`: `"STG_ORDERS"."CUSTOMER_ID" = "DIM_CUSTOMER"."CUSTOMER_ID"`
+
+Inspect the Fact node first (`mcp__coalesce__get_workspace_node`) to determine the correct `sourceMapping` index `[N]` for each dimension predecessor. Each predecessor has its own entry in the `sourceMapping` array.
 
 Where:
-- Left side = the natural key column on the fact stage (e.g. `CUSTOMER_ID`)
-- Right side = the surrogate key column on the dimension node (e.g. `DIM_CUSTOMER_KEY`)
+- Left side = the natural key column on the fact stage (e.g. `"STG_ORDERS"."CUSTOMER_ID"`)
+- Right side = the matching natural/business key column on the dimension node (e.g. `"DIM_CUSTOMER"."CUSTOMER_ID"`)
 
 **Example — complete star schema wiring for a sales fact:**
 
 ```
-DIM_CUSTOMER joined on: "STG_CUSTOMER"."CUSTOMER_ID" = "DIM_CUSTOMER"."DIM_CUSTOMER_KEY"
-DIM_PRODUCT  joined on: "STG_PRODUCT"."PRODUCT_ID"   = "DIM_PRODUCT"."DIM_PRODUCT_KEY"
-DIM_DATE     joined on: "STG_ORDERS"."ORDER_DATE"     = "DIM_DATE"."DIM_DATE_KEY"
+DIM_CUSTOMER joined on: "STG_ORDERS"."CUSTOMER_ID" = "DIM_CUSTOMER"."CUSTOMER_ID"
+DIM_PRODUCT  joined on: "STG_ORDERS"."PRODUCT_ID"  = "DIM_PRODUCT"."PRODUCT_ID"
+DIM_DATE     joined on: "STG_ORDERS"."ORDER_DATE"   = "DIM_DATE"."DATE_KEY"
 ```
 
-**⚠️ Common mistake:** Creating the Fact node before the dimensions are built, or setting `predecessor_node_ids` to only the fact stage. The Fact node must list all dimension stages as predecessors — otherwise the foreign key columns have no source to draw from and the JOINs will fail.
+**⚠️ Common mistake:** Creating the Fact node before the dimensions are built, or setting `predecessor_node_ids` to only the fact stage. The Fact node must list all **Dimension nodes** as predecessors — otherwise the foreign key columns have no source to draw from and the JOINs will fail.
 
 ---
 
@@ -264,7 +266,7 @@ The business key is the column that uniquely identifies a record (e.g. `EMPLOYEE
 **6b. Set JOIN conditions (if applicable):**
 
 If the downstream node joins multiple sources, configure the JOIN condition:
-- `field_path`: `"metadata.storageMapping[N].join"`
+- `field_path`: `"metadata.sourceMapping[N].join.joinCondition"`
 - `new_value`: the JOIN ON condition SQL
 
 **6c. Add WHERE clause (if applicable):**
@@ -340,7 +342,7 @@ Fact:
   {SRC_ORDERS} (Source)
       → STG_ORDERS (Stage)
           → FACT_ORDERS (Fact)
-              predecessors: STG_ORDERS + STG_CUSTOMER + STG_PRODUCT + STG_DATE
+              predecessors: STG_ORDERS + DIM_CUSTOMER + DIM_PRODUCT + DIM_DATE
 
 Fact foreign keys (how dimensions connect):
   DIM_CUSTOMER_KEY ← JOIN ON STG_ORDERS.CUSTOMER_ID = DIM_CUSTOMER.DIM_CUSTOMER_KEY
@@ -401,7 +403,8 @@ Fact foreign keys (how dimensions connect):
 | Assuming a transform was applied without verifying | Always call `get_workspace_node` after patching to confirm before moving on |
 | Triggering a run without asking | Always ask the user before calling `start_run` |
 | **Star schema: creating Fact before all Dimensions** | Build and configure every Dimension first — the Fact node needs their surrogate keys to exist |
-| **Star schema: Fact predecessor_node_ids missing dimensions** | Always include all Dimension Stage node IDs in the Fact node's predecessor list, not just the Fact Stage |
+| **Star schema: Fact predecessor_node_ids missing dimensions** | Always include all **Dimension node IDs** (not Stage IDs) in the Fact node's predecessor list, not just the Fact Stage |
+| **Star schema: using `metadata.storageMapping[N].join` for JOIN path** | Use `metadata.sourceMapping[N].join.joinCondition` — the raw API key is `sourceMapping` and `join` is an object with a `joinCondition` property |
 | **Star schema: using natural keys as FK columns on Fact** | Fact foreign key columns must reference the Dimension's surrogate key (e.g. `DIM_CUSTOMER_KEY`), not the raw natural key |
 | **Star schema: JOIN references wrong side of the key** | LEFT side of JOIN = natural key on fact stage, RIGHT side = surrogate key on dimension |
 
