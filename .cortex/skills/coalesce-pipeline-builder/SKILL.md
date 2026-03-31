@@ -184,8 +184,9 @@ For each entity (customer, product, date, etc.):
 After ALL dimensions are built:
   4. Create the Fact Stage node (sourced from the fact source table)
   5. Create the Fact node with predecessor_node_ids = [fact_stage_id, dim1_node_id, dim2_node_id, ...]
-  6. Add foreign key columns to the Fact node for each dimension
-  7. Configure JOIN conditions on the Fact node to link each dimension
+  6. ⚠️ Audit the Fact node for duplicate column names — drop or rename any duplicates before continuing
+  7. Add surrogate foreign key columns to the Fact node for each dimension
+  8. Configure JOIN conditions on the Fact node to link each dimension
 ```
 
 **5b-i. Identify the surrogate key name for each dimension:**
@@ -209,11 +210,36 @@ predecessor_node_ids: [fact_stage_id, dim_customer_node_id, dim_product_node_id,
 
 This wires the Fact node to pull columns from the fact's own stage (for measures/natural keys) and from each Dimension node (for surrogate keys).
 
-**5b-iii. Add foreign key columns to the Fact node:**
+**5b-iii. Deduplicate columns on the Fact node:**
+
+**⚠️ CRITICAL — resolve duplicate column names before configuring the Fact node.**
+
+When the Fact node has multiple predecessors (a Stage + multiple Dimension nodes), Coalesce pulls all columns from every predecessor into the Fact node by default. This will create **duplicate column names** — for example, both `STG_ORDERS` and `DIM_CUSTOMERS` will each have a `CUSTOMER_ID` column.
+
+**After creating the Fact node, immediately call `mcp__coalesce__get_workspace_node` and audit the full `metadata.columns[]` list for duplicates.**
+
+For every duplicate column name found, you must do one of the following:
+
+**Option A — Drop it from the Fact (preferred for natural/business keys that already exist on the fact stage):**
+- The Fact node should only carry measures and surrogate foreign keys — do not carry natural key columns from dimension nodes
+- Remove the dimension's natural key column from the Fact by setting `metadata.columns[N].exclude` to `true` (or equivalent Coalesce exclusion mechanism)
+- If Coalesce does not support exclusion via patch, rename it instead (Option B)
+
+**Option B — Rename with a table suffix to make it unambiguous:**
+- `field_path`: `"metadata.columns[N].name"` → `"{ORIGINAL_NAME}_{TABLE_SUFFIX}"`
+- Example: a second `CUSTOMER_ID` coming from `DIM_CUSTOMERS` → rename to `CUSTOMER_ID_DIM`
+
+**The Fact node's column set should contain only:**
+1. Surrogate foreign keys (one per dimension, e.g. `DIM_CUSTOMER_KEY`, `DIM_PRODUCT_KEY`)
+2. Measures from the fact stage (e.g. `QUANTITY`, `UNIT_PRICE`, `DISCOUNT_AMOUNT`, `GROSS_REVENUE`)
+3. Degenerate dimensions from the fact stage (e.g. `ORDER_ID`, `ORDER_DATE`)
+4. **No descriptive attributes from dimension tables** — those belong in the dimension tables and are accessed via JOIN at query time
+
+**Add foreign key columns to the Fact node:**
 
 The Fact node needs one foreign key column per dimension. These columns hold the surrogate key value from each dimension so records can be joined.
 
-For each dimension, call `mcp__coalesce__patch_node_field` to add a foreign key column to the Fact node's `metadata.columns[]`. The column's transform should reference the matching natural key from the fact source — Coalesce will resolve this to the dimension's surrogate key via the JOIN.
+For each dimension, call `mcp__coalesce__patch_node_field` to add a foreign key column to the Fact node's `metadata.columns[]`. The column's transform must reference the dimension's surrogate key using the dimension node's alias:
 
 Example — adding a customer foreign key column:
 - `field_path`: `"metadata.columns[N].name"` → `"DIM_CUSTOMER_KEY"`
@@ -407,6 +433,8 @@ Fact foreign keys (how dimensions connect):
 | **Star schema: using `metadata.storageMapping[N].join` for JOIN path** | Use `metadata.sourceMapping[N].join.joinCondition` — the raw API key is `sourceMapping` and `join` is an object with a `joinCondition` property |
 | **Star schema: using natural keys as FK columns on Fact** | Fact foreign key columns must reference the Dimension's surrogate key (e.g. `DIM_CUSTOMER_KEY`), not the raw natural key |
 | **Star schema: JOIN references wrong side of the key** | LEFT side of JOIN = natural key on fact stage, RIGHT side = surrogate key on dimension |
+| **Star schema: duplicate column names on Fact node** | After creating the Fact node, audit all columns for duplicates (e.g. `CUSTOMER_ID` from both stage and dimension). Either drop the dimension's copy or rename it with a `_DIM` suffix. Never leave two columns with the same name — Coalesce will error at compile time. |
+| **Star schema: carrying descriptive attributes on Fact** | Fact nodes should only contain surrogate FKs, measures, and degenerate dimensions. Do not bring `FIRST_NAME`, `PRODUCT_NAME`, etc. onto the Fact — those live on the dimension tables. |
 
 ---
 
