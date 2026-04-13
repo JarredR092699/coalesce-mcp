@@ -5,11 +5,17 @@ Provides tools for interacting with Coalesce API:
 - Node management (read and write, unless COALESCE_READONLY_MODE=true)
 """
 
+import contextlib
 import os
+from collections.abc import AsyncIterator
 
 from mcp.server import Server
 from mcp.types import Tool, TextContent
-from mcp.server.stdio import stdio_server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.routing import Route
+import uvicorn
 
 READONLY_MODE = os.getenv("COALESCE_READONLY_MODE", "false").lower() == "true"
 WRITE_TOOLS = {"create_workspace_node", "set_node", "patch_node_field", "start_run", "retry_run", "cancel_run"}
@@ -36,6 +42,32 @@ from coalesce_mcp.client import (
 
 # Create MCP server instance
 server = Server("coalesce-mcp")
+
+session_manager = StreamableHTTPSessionManager(
+    app=server,
+    json_response=False,
+    stateless=True,
+)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: Starlette) -> AsyncIterator[None]:
+    async with session_manager.run():
+        yield
+
+
+async def handle_mcp(request: Request) -> None:
+    await session_manager.handle_request(
+        request.scope, request.receive, request._send
+    )
+
+
+starlette_app = Starlette(
+    lifespan=lifespan,
+    routes=[
+        Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST", "DELETE"]),
+    ],
+)
 
 
 @server.list_tools()
@@ -667,19 +699,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f'{{"error": "Unknown tool: {name}"}}')]
 
 
-async def async_main():
-    """Run the MCP server (async)."""
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
-
-def main(): 
+def main():
     """Entry point for console script"""
-    import asyncio
-    asyncio.run(async_main())
+    host = os.getenv("MCP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_PORT", "8000"))
+    uvicorn.run(starlette_app, host=host, port=port)
 
 
 if __name__ == "__main__":
