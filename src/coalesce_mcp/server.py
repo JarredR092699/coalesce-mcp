@@ -9,12 +9,14 @@ import contextlib
 import os
 from collections.abc import AsyncIterator
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.routing import Route
+from starlette.routing import Mount
 import uvicorn
 
 READONLY_MODE = os.getenv("COALESCE_READONLY_MODE", "false").lower() == "true"
@@ -56,16 +58,10 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
         yield
 
 
-async def handle_mcp(request: Request) -> None:
-    await session_manager.handle_request(
-        request.scope, request.receive, request._send
-    )
-
-
 starlette_app = Starlette(
     lifespan=lifespan,
     routes=[
-        Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST", "DELETE"]),
+        Mount("/mcp", app=session_manager.handle_request),
     ],
 )
 
@@ -702,7 +698,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 def main():
     """Entry point for console script"""
     host = os.getenv("MCP_HOST", "0.0.0.0")
-    port = int(os.getenv("MCP_PORT", "8000"))
+    port = int(os.getenv("MCP_PORT", "8001"))
     uvicorn.run(starlette_app, host=host, port=port)
 
 
