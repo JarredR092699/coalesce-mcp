@@ -1,0 +1,12 @@
+{
+    "mcpServers": {
+        "coalesce": {
+            "type": "http", 
+            "url": "http://localhost:8001/mcp",
+            "env": {
+                "COALESCE_API_TOKEN": "AMf-vBxF--_0YzHK7OEe2nMXOCyVOCbz0Ko1iJyb-uLvijg3NcOX7bFLgvo-duH5IYqrHskhsNYv7TX-G5-MwNWOTWE9N4tnOqTzX_1x0MXmPDz4BTRAUA1mgwBledwllevJcWmu9hJKqIQvaoQlfCWLUkmyx-iCIGjlq3T-FtbUfWVAievOzG8TORVvOKXa13L2aKra_Z31I-_75nCxzYY9bx7wb5Bd6Q",
+                "COALESCE_READONLY_MODE": "true"
+            }
+        }
+    }
+}

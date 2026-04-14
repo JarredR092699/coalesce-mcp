@@ -3,5 +3,9 @@
     "allow": [
       "WebFetch(domain:docs.coalesce.io)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "coalesce"
+  ],
+  "enableAllProjectMcpServers": true
 }

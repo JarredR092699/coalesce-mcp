@@ -234,14 +234,21 @@ class CoalesceClient:
             return {"data": []}
         return response.json()
 
-    async def list_workspace_nodes(self, workspace_id: str) -> dict[str, Any]:
+    async def list_workspace_nodes(
+        self,
+        workspace_id: str,
+        name_filter: str | None = None,
+    ) -> dict[str, Any]:
         """
-        List all development nodes in a workspace.
+        List development nodes in a workspace, optionally filtering by name.
 
         Endpoint: GET /api/v1/workspaces/{workspaceID}/nodes
 
         Args:
             workspace_id: The workspace ID to list nodes from
+            name_filter: Optional partial name to filter nodes (case-insensitive).
+                When provided, exhaustively paginates and returns only matching nodes.
+                When omitted, returns the first page only (current behavior).
 
         Returns:
             Dict with array of node objects
@@ -251,7 +258,13 @@ class CoalesceClient:
         response.raise_for_status()
         if not response.content:
             return {"data": []}
-        return response.json()
+        page_data = response.json()
+        all_nodes = page_data if isinstance(page_data, list) else page_data.get("data", [])
+        if name_filter:
+            needle = name_filter.lower()
+            matches = [n for n in all_nodes if needle in n.get("name", "").lower()]
+            return {"data": matches, "total": len(matches), "filtered": True}
+        return page_data
 
     async def get_workspace_node(self, workspace_id: str, node_id: str) -> dict[str, Any]:
         """
@@ -292,6 +305,57 @@ class CoalesceClient:
         if not response.content:
             return {}
         return response.json()
+
+    async def search_nodes_by_name(
+        self,
+        workspace_id: str,
+        node_name: str,
+        exact_match: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Search all workspace nodes by name and return the matching node with full details.
+
+        Exhaustively paginates the workspace nodes endpoint, finds the matching node,
+        then fetches its full configuration in a single combined operation.
+
+        Args:
+            workspace_id: The workspace ID to search in
+            node_name: Node name to search for (partial match by default)
+            exact_match: If True, requires exact name match (case-insensitive)
+
+        Returns:
+            Dict with matched node details or not_found indicator
+        """
+        client = await self._get_client()
+        response = await client.get(f"v1/workspaces/{workspace_id}/nodes")
+        response.raise_for_status()
+        if not response.content:
+            all_nodes: list[dict] = []
+        else:
+            page_data = response.json()
+            all_nodes = page_data if isinstance(page_data, list) else page_data.get("data", [])
+
+        needle = node_name.lower()
+        if exact_match:
+            matches = [n for n in all_nodes if n.get("name", "").lower() == needle]
+        else:
+            matches = [n for n in all_nodes if needle in n.get("name", "").lower()]
+
+        if not matches:
+            return {"found": False, "node_name": node_name, "searched": len(all_nodes)}
+
+        node = matches[0]
+        node_id = node.get("id")
+        detail_response = await client.get(f"v1/workspaces/{workspace_id}/nodes/{node_id}")
+        detail_response.raise_for_status()
+        detail = detail_response.json() if detail_response.content else {}
+
+        return {
+            "found": True,
+            "node_id": node_id,
+            "matches_found": len(matches),
+            "node": detail,
+        }
 
     async def create_workspace_node(
         self,
@@ -455,7 +519,7 @@ def get_client() -> CoalesceClient:
 async def list_job_runs(
     environment_id: str | None = None,
     run_status: str | None = None,
-    limit: int = 50,
+    limit: int = 10,
     starting_from: str | None = None,
 ) -> str:
     """
@@ -502,7 +566,7 @@ async def list_job_runs(
         "runs": formatted_runs,
         "next_cursor": result.get("next"),
         "count": len(formatted_runs),
-    }, indent=2, default=str)
+    }, default=str)
 
 
 async def get_run(run_id: str) -> str:
@@ -906,6 +970,13 @@ async def investigate_failure(run_id: str) -> str:
             },
         }, indent=2, default=str)
 
+    BLOCKED_LIMIT = 10
+    blocked_sample = [
+        _format_blocked_node(nid, node_map[nid])
+        for nid in list(all_blocked_ids)[:BLOCKED_LIMIT]
+        if nid in node_map
+    ]
+
     return json.dumps({
         "run": run_summary,
         "summary": {
@@ -916,13 +987,10 @@ async def investigate_failure(run_id: str) -> str:
             "other": other_count,
         },
         "failed_nodes": [_format_failed_node(nid, n) for nid, n in failed],
-        "downstream_blocked_nodes": [
-            _format_blocked_node(nid, node_map[nid])
-            for nid in all_blocked_ids
-            if nid in node_map
-        ],
+        "downstream_blocked_nodes": blocked_sample,
+        "downstream_blocked_truncated": len(all_blocked_ids) > BLOCKED_LIMIT,
         "downstream_tracing": "dependency_graph" if has_pred_info else "heuristic_skipped_nodes",
-    }, indent=2, default=str)
+    }, default=str)
 
 
 async def list_failed_runs(
@@ -984,7 +1052,7 @@ async def list_environment_nodes_tool(environment_id: str) -> str:
             {k: n[k] for k in ("id", "name", "nodeType", "locationName", "database", "schema") if k in n}
             for n in nodes
         ]
-        return json.dumps({"nodes": slim, "total": result.get("total") if isinstance(result, dict) else len(slim)}, indent=2, default=str)
+        return json.dumps({"nodes": slim, "total": result.get("total") if isinstance(result, dict) else len(slim)}, default=str)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to list environment nodes: {e.response.status_code}",
@@ -993,35 +1061,137 @@ async def list_environment_nodes_tool(environment_id: str) -> str:
         }, indent=2)
 
 
-async def list_workspace_nodes_tool(workspace_id: str) -> str:
+def _make_code_snippet(workspace_id: str, name_filter: str | None = None) -> str:
+    """Return a ready-to-execute Python snippet for searching workspace nodes via the Coalesce API."""
+    token = os.getenv("COALESCE_API_TOKEN", "<COALESCE_API_TOKEN>")
+    base = os.getenv("COALESCE_BASE_URL", "https://app.coalescesoftware.io/api/").rstrip("/") + "/"
+    filter_expr = f"'{name_filter.upper()}' in n['name'].upper()" if name_filter else "'YOUR_SEARCH_TERM' in n['name'].upper()"
+    return (
+        "import httpx, json\n"
+        f"token = '{token}'\n"
+        f"base = '{base}'\n"
+        "headers = {'Authorization': f'Bearer {token}'}\n"
+        "all_nodes, offset, page_size = [], 0, 500\n"
+        "while True:\n"
+        f"    r = httpx.get(f'{{base}}v1/workspaces/{workspace_id}/nodes', headers=headers, params={{'limit': page_size, 'offset': offset}})\n"
+        "    page = r.json().get('data', [])\n"
+        "    all_nodes.extend(page)\n"
+        "    if len(page) < page_size:\n"
+        "        break\n"
+        "    offset += page_size\n"
+        f"matches = [n for n in all_nodes if {filter_expr}]\n"
+        "print(json.dumps(matches, indent=2))\n"
+    )
+
+
+async def list_workspace_nodes_tool(workspace_id: str, name_filter: str | None = None) -> str:
     """
-    List all development nodes in a workspace.
+    List development nodes in a workspace, with optional name filtering.
 
     Use this tool to:
-    - View all transformations in development
-    - Audit workspace structure
-    - Inventory data pipeline nodes
-    - Find specific nodes by browsing
+    - Find a specific node by name when you already know the name from investigation context
+      (e.g. a failing node name returned by investigate_failure — pass it as name_filter)
+    - Audit workspace structure or inventory all nodes (omit name_filter)
+
+    When name_filter is provided: exhaustively searches all pages and returns only matching
+    nodes, keeping the response small. When omitted: returns the first page (up to 100 nodes).
+
+    The response includes a code_snippet field with ready-to-run Python that calls the
+    Coalesce API directly — execute it via mcp__ide__executeCode for targeted searches
+    without loading all results into context.
 
     Args:
         workspace_id: The workspace ID to list nodes from
+        name_filter: Optional partial node name to filter by (case-insensitive).
+            Pass this when you already know the node name you're looking for.
 
     Returns:
-        JSON array of node objects with IDs, names, types, and metadata
+        JSON with matching node objects (id, name, nodeType, locationName, schema, database)
+        plus a code_snippet for direct API access.
     """
     client = get_client()
     try:
-        result = await client.list_workspace_nodes(workspace_id)
+        result = await client.list_workspace_nodes(workspace_id, name_filter=name_filter)
         nodes = result if isinstance(result, list) else result.get("data", [])
         slim = [
             {k: n[k] for k in ("id", "name", "nodeType", "locationName", "database", "schema") if k in n}
             for n in nodes
         ]
-        return json.dumps({"nodes": slim, "total": result.get("total") if isinstance(result, dict) else len(slim)}, indent=2, default=str)
+        return json.dumps({
+            "nodes": slim,
+            "total": len(slim),
+            "filtered": bool(name_filter),
+            "code_snippet": _make_code_snippet(workspace_id, name_filter),
+            "code_hint": (
+                "Execute code_snippet via mcp__ide__executeCode to search nodes directly "
+                "via the Coalesce API — modify the filter condition as needed."
+            ),
+        }, default=str)
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to list workspace nodes: {e.response.status_code}",
             "workspace_id": workspace_id,
+            "details": e.response.text if e.response.text else None,
+        }, indent=2)
+
+
+async def search_nodes_by_name_tool(
+    workspace_id: str,
+    node_name: str,
+    exact_match: bool = False,
+) -> str:
+    """
+    Find a workspace node by name and return its full configuration — in one call.
+
+    Use this tool when:
+    - You know the node name (or partial name) from investigation context and need its full config
+    - You want to skip the list_workspace_nodes → find UUID → get_workspace_node round-trip
+    - A failing node name was returned by investigate_failure and you want to inspect its SQL
+
+    This is the preferred tool for name-based node lookup. It exhaustively searches all
+    workspace nodes, resolves the UUID internally, and returns the full slimmed node config
+    in a single tool call.
+
+    The response includes a code_snippet for direct API access via mcp__ide__executeCode.
+
+    Args:
+        workspace_id: The workspace ID to search in
+        node_name: Node name to search for. Partial match by default (e.g. "GAME_DAY_BURST"
+            matches "STG_SBL_GAME_DAY_BURST_10_FILTER"). Set exact_match=true for exact.
+        exact_match: If true, requires exact name match (case-insensitive). Default false.
+
+    Returns:
+        JSON with full node configuration (slimmed) plus node_id and code_snippet.
+    """
+    client = get_client()
+    try:
+        result = await client.search_nodes_by_name(workspace_id, node_name, exact_match=exact_match)
+        if not result.get("found"):
+            return json.dumps({
+                "found": False,
+                "node_name": node_name,
+                "nodes_searched": result.get("searched", 0),
+                "hint": "Try a shorter partial name or check the workspace_id.",
+                "code_snippet": _make_code_snippet(workspace_id, node_name),
+            }, indent=2)
+
+        node_detail = result.get("node", {})
+        return json.dumps({
+            "found": True,
+            "node_id": result.get("node_id"),
+            "matches_found": result.get("matches_found", 1),
+            "node": _slim_node(node_detail),
+            "code_snippet": _make_code_snippet(workspace_id, node_name),
+            "code_hint": (
+                "Execute code_snippet via mcp__ide__executeCode to search nodes directly "
+                "via the Coalesce API without any MCP tool call."
+            ),
+        }, indent=2, default=str)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({
+            "error": f"Failed to search workspace nodes: {e.response.status_code}",
+            "workspace_id": workspace_id,
+            "node_name": node_name,
             "details": e.response.text if e.response.text else None,
         }, indent=2)
 

@@ -32,6 +32,7 @@ from coalesce_mcp.client import (
     investigate_failure,
     list_environment_nodes_tool,
     list_workspace_nodes_tool,
+    search_nodes_by_name_tool,
     get_workspace_node_tool,
     get_environment_node_tool,
     create_workspace_node_tool,
@@ -95,8 +96,8 @@ Returns a list of runs with status, timestamps, and job names.""",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of runs to return (default 50)",
-                        "default": 50,
+                        "description": "Maximum number of runs to return (default 10)",
+                        "default": 10,
                     },
                     "starting_from": {
                         "type": "string",
@@ -271,15 +272,19 @@ Returns array of node objects with IDs, names, types, and metadata.""",
         ),
         Tool(
             name="list_workspace_nodes",
-            description="""List all development nodes in a workspace.
+            description="""List development nodes in a workspace, with optional name filtering.
 
 Use this tool to:
-- View all transformations in development
-- Audit workspace structure
-- Inventory data pipeline nodes
-- Find specific nodes by browsing
+- Find a specific node by name when you already know it from investigation context
+  (e.g. a failing node name from investigate_failure — pass it as name_filter)
+- Audit workspace structure or browse all nodes (omit name_filter)
 
-Returns array of node objects with IDs, names, types, and metadata.""",
+IMPORTANT: If you already know the node name you're looking for, pass name_filter to
+avoid loading hundreds of nodes into context. The tool will search all pages and return
+only matching nodes. For full node config in one call, prefer search_nodes_by_name.
+
+Returns node objects (id, name, nodeType, locationName, schema, database) plus a
+code_snippet for direct Coalesce API access via mcp__ide__executeCode.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -287,8 +292,53 @@ Returns array of node objects with IDs, names, types, and metadata.""",
                         "type": "string",
                         "description": "The workspace ID to list nodes from",
                     },
+                    "name_filter": {
+                        "type": "string",
+                        "description": (
+                            "Optional partial node name to filter by (case-insensitive). "
+                            "Pass this when you already know the node name you are looking for. "
+                            "Example: 'GAME_DAY_BURST' matches 'STG_SBL_GAME_DAY_BURST_10_FILTER'."
+                        ),
+                    },
                 },
                 "required": ["workspace_id"],
+            },
+        ),
+        Tool(
+            name="search_nodes_by_name",
+            description="""Find a workspace node by name and return its full configuration in one call.
+
+Use this tool when:
+- You know a node name (or partial name) from investigation context and need its full SQL/config
+- A failing node name was returned by investigate_failure and you want to inspect it
+- You want to skip the list → find UUID → get_workspace_node round-trip
+
+Exhaustively searches all workspace nodes, resolves the UUID internally, and returns the
+full slimmed node config (columns, transforms, source SQL, dependencies) in a single call.
+
+Also returns a code_snippet for direct API access via mcp__ide__executeCode.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "The workspace ID to search in",
+                    },
+                    "node_name": {
+                        "type": "string",
+                        "description": (
+                            "Node name to search for. Partial match by default — "
+                            "'GAME_DAY_BURST' matches 'STG_SBL_GAME_DAY_BURST_10_FILTER'. "
+                            "Use exact_match=true for an exact (case-insensitive) match."
+                        ),
+                    },
+                    "exact_match": {
+                        "type": "boolean",
+                        "description": "If true, requires exact name match (case-insensitive). Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["workspace_id", "node_name"],
             },
         ),
         Tool(
@@ -619,7 +669,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         workspace_id = arguments.get("workspace_id")
         if not workspace_id:
             return [TextContent(type="text", text='{"error": "workspace_id is required"}')]
-        result = await list_workspace_nodes_tool(workspace_id)
+        result = await list_workspace_nodes_tool(workspace_id, name_filter=arguments.get("name_filter"))
+        return [TextContent(type="text", text=result)]
+
+    elif name == "search_nodes_by_name":
+        workspace_id = arguments.get("workspace_id")
+        node_name = arguments.get("node_name")
+        if not workspace_id or not node_name:
+            return [TextContent(type="text", text='{"error": "workspace_id and node_name are required"}')]
+        result = await search_nodes_by_name_tool(
+            workspace_id,
+            node_name,
+            exact_match=arguments.get("exact_match", False),
+        )
         return [TextContent(type="text", text=result)]
 
     elif name == "get_workspace_node":
