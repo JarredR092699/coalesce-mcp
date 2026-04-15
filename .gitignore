@@ -53,3 +53,6 @@ docs/
 
 # Screenshots / local content
 content/
+
+# mcp.json
+.mcp.json
