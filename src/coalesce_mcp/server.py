@@ -24,15 +24,10 @@ WRITE_TOOLS = {"create_workspace_node", "set_node", "patch_node_field", "start_r
 
 from coalesce_mcp.client import (
     list_job_runs,
-    get_run,
-    get_run_status,
     get_run_results,
-    get_job_details,
     list_failed_runs,
     investigate_failure,
     list_environment_nodes_tool,
-    list_workspace_nodes_tool,
-    search_nodes_by_name_tool,
     get_workspace_node_tool,
     get_environment_node_tool,
     create_workspace_node_tool,
@@ -138,44 +133,6 @@ Use this tool to:
             },
         ),
         Tool(
-            name="get_run",
-            description="""Get details for a specific job run.
-
-Use this tool to:
-- Get full details about a specific run
-- See run configuration and parameters
-- Check when a run started and ended""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "The ID of the run to retrieve",
-                    },
-                },
-                "required": ["run_id"],
-            },
-        ),
-        Tool(
-            name="get_run_status",
-            description="""Get the current status of a job run.
-
-Use this tool to:
-- Check if a run is still in progress
-- See the current execution status
-- Monitor long-running jobs""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "The ID of the run to check",
-                    },
-                },
-                "required": ["run_id"],
-            },
-        ),
-        Tool(
             name="get_run_results",
             description="""Get pre-processed results for a job run — only failures and blocked downstream nodes.
 
@@ -226,29 +183,6 @@ available, or falls back to identifying skipped/canceled nodes as a heuristic.""
             },
         ),
         Tool(
-            name="get_job_details",
-            description="""Get comprehensive details about a job run (combines run metadata + extracted errors).
-
-For failure investigation, prefer investigate_failure — it is more concise and
-purpose-built for root cause analysis. Use get_job_details when you want the
-raw run object alongside extracted errors in a single call.
-
-Use this tool to:
-- Get run metadata and extracted error list together
-
-Returns run info and extracted error details for failed nodes.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "The ID of the run to get details for",
-                    },
-                },
-                "required": ["run_id"],
-            },
-        ),
-        Tool(
             name="list_environment_nodes",
             description="""List all deployed nodes in an environment.
 
@@ -271,65 +205,35 @@ Returns array of node objects with IDs, names, types, and metadata.""",
             },
         ),
         Tool(
-            name="list_workspace_nodes",
-            description="""List development nodes in a workspace, with optional name filtering.
+            name="get_workspace_node",
+            description="""Get full configuration for a workspace node — by node ID or by name search.
+
+Provide node_id for a direct fetch, or node_name to search across all workspace nodes.
+If both are provided, node_id takes precedence. Partial name matching is used by default.
 
 Use this tool to:
-- Find a specific node by name when you already know it from investigation context
-  (e.g. a failing node name from investigate_failure — pass it as name_filter)
-- Audit workspace structure or browse all nodes (omit name_filter)
+- Inspect SQL, column transforms, and config of a workspace node
+- Look up a failing node by name after investigate_failure identifies it
+- Get the full node config before patching with patch_node_field or set_node
 
-IMPORTANT: If you already know the node name you're looking for, pass name_filter to
-avoid loading hundreds of nodes into context. The tool will search all pages and return
-only matching nodes. For full node config in one call, prefer search_nodes_by_name.
-
-Returns node objects (id, name, nodeType, locationName, schema, database) plus a
-code_snippet for direct Coalesce API access via mcp__ide__executeCode.""",
+Returns slimmed node config: name, type, columns (with transforms), source mappings, config.""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "workspace_id": {
                         "type": "string",
-                        "description": "The workspace ID to list nodes from",
+                        "description": "The workspace ID to search in or fetch from",
                     },
-                    "name_filter": {
+                    "node_id": {
                         "type": "string",
-                        "description": (
-                            "Optional partial node name to filter by (case-insensitive). "
-                            "Pass this when you already know the node name you are looking for. "
-                            "Example: 'GAME_DAY_BURST' matches 'STG_SBL_GAME_DAY_BURST_10_FILTER'."
-                        ),
-                    },
-                },
-                "required": ["workspace_id"],
-            },
-        ),
-        Tool(
-            name="search_nodes_by_name",
-            description="""Find a workspace node by name and return its full configuration in one call.
-
-Use this tool when:
-- You know a node name (or partial name) from investigation context and need its full SQL/config
-- A failing node name was returned by investigate_failure and you want to inspect it
-- You want to skip the list → find UUID → get_workspace_node round-trip
-
-Exhaustively searches all workspace nodes, resolves the UUID internally, and returns the
-full slimmed node config (columns, transforms, source SQL, dependencies) in a single call.
-
-Also returns a code_snippet for direct API access via mcp__ide__executeCode.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "workspace_id": {
-                        "type": "string",
-                        "description": "The workspace ID to search in",
+                        "description": "Node UUID for direct fetch (fastest path — use if you have it)",
                     },
                     "node_name": {
                         "type": "string",
                         "description": (
-                            "Node name to search for. Partial match by default — "
-                            "'GAME_DAY_BURST' matches 'STG_SBL_GAME_DAY_BURST_10_FILTER'. "
-                            "Use exact_match=true for an exact (case-insensitive) match."
+                            "Partial or full node name to search for (case-insensitive). "
+                            "Example: 'GAME_DAY_BURST' matches 'STG_SBL_GAME_DAY_BURST_10_FILTER'. "
+                            "Use exact_match=true if the partial name is ambiguous."
                         ),
                     },
                     "exact_match": {
@@ -338,33 +242,7 @@ Also returns a code_snippet for direct API access via mcp__ide__executeCode.""",
                         "default": False,
                     },
                 },
-                "required": ["workspace_id", "node_name"],
-            },
-        ),
-        Tool(
-            name="get_workspace_node",
-            description="""Get complete details for a specific workspace node.
-
-Use this tool to:
-- View full node configuration and SQL
-- Understand a transformation's logic
-- Get metadata for a specific node
-- Inspect node properties before updating
-
-Returns complete node object including SQL, metadata, and configuration.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "workspace_id": {
-                        "type": "string",
-                        "description": "The workspace ID containing the node",
-                    },
-                    "node_id": {
-                        "type": "string",
-                        "description": "The node ID to retrieve",
-                    },
-                },
-                "required": ["workspace_id", "node_id"],
+                "required": ["workspace_id"],
             },
         ),
         Tool(
@@ -519,7 +397,7 @@ Use this tool to:
 - Trigger a full environment refresh
 - Run a specific job by job ID
 
-After starting, use get_run_status with the returned run_id to poll progress.
+After starting, use investigate_failure with the returned run_id to check results.
 Returns run_id and initial status.""",
             inputSchema={
                 "type": "object",
@@ -551,8 +429,7 @@ Recommended workflow:
 1. investigate_failure → identify root cause
 2. patch_node_field → fix the node
 3. retry_run → verify the fix
-4. get_run_status → poll until complete
-5. get_run_results → confirm all nodes passed
+4. investigate_failure → confirm all nodes passed
 
 Returns a new run_id for the retry run.""",
             inputSchema={
@@ -623,32 +500,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         )
         return [TextContent(type="text", text=result)]
 
-    elif name == "get_run":
-        run_id = arguments.get("run_id")
-        if not run_id:
-            return [TextContent(type="text", text='{"error": "run_id is required"}')]
-        result = await get_run(run_id)
-        return [TextContent(type="text", text=result)]
-
-    elif name == "get_run_status":
-        run_id = arguments.get("run_id")
-        if not run_id:
-            return [TextContent(type="text", text='{"error": "run_id is required"}')]
-        result = await get_run_status(run_id)
-        return [TextContent(type="text", text=result)]
-
     elif name == "get_run_results":
         run_id = arguments.get("run_id")
         if not run_id:
             return [TextContent(type="text", text='{"error": "run_id is required"}')]
         result = await get_run_results(run_id)
-        return [TextContent(type="text", text=result)]
-
-    elif name == "get_job_details":
-        run_id = arguments.get("run_id")
-        if not run_id:
-            return [TextContent(type="text", text='{"error": "run_id is required"}')]
-        result = await get_job_details(run_id)
         return [TextContent(type="text", text=result)]
 
     elif name == "investigate_failure":
@@ -665,31 +521,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = await list_environment_nodes_tool(environment_id)
         return [TextContent(type="text", text=result)]
 
-    elif name == "list_workspace_nodes":
-        workspace_id = arguments.get("workspace_id")
-        if not workspace_id:
-            return [TextContent(type="text", text='{"error": "workspace_id is required"}')]
-        result = await list_workspace_nodes_tool(workspace_id, name_filter=arguments.get("name_filter"))
-        return [TextContent(type="text", text=result)]
-
-    elif name == "search_nodes_by_name":
-        workspace_id = arguments.get("workspace_id")
-        node_name = arguments.get("node_name")
-        if not workspace_id or not node_name:
-            return [TextContent(type="text", text='{"error": "workspace_id and node_name are required"}')]
-        result = await search_nodes_by_name_tool(
-            workspace_id,
-            node_name,
-            exact_match=arguments.get("exact_match", False),
-        )
-        return [TextContent(type="text", text=result)]
-
     elif name == "get_workspace_node":
         workspace_id = arguments.get("workspace_id")
         node_id = arguments.get("node_id")
-        if not workspace_id or not node_id:
-            return [TextContent(type="text", text='{"error": "workspace_id and node_id are required"}')]
-        result = await get_workspace_node_tool(workspace_id, node_id)
+        node_name = arguments.get("node_name")
+        if not workspace_id:
+            return [TextContent(type="text", text='{"error": "workspace_id is required"}')]
+        if not node_id and not node_name:
+            return [TextContent(type="text", text='{"error": "Either node_id or node_name is required"}')]
+        result = await get_workspace_node_tool(
+            workspace_id,
+            node_id=node_id,
+            node_name=node_name,
+            exact_match=arguments.get("exact_match", False),
+        )
         return [TextContent(type="text", text=result)]
 
     elif name == "get_environment_node":

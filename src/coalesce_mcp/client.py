@@ -569,61 +569,6 @@ async def list_job_runs(
     }, default=str)
 
 
-async def get_run(run_id: str) -> str:
-    """
-    Get details for a specific job run.
-
-    Use this tool to:
-    - Get full details about a specific run
-    - See run configuration and parameters
-    - Check when a run started and ended
-
-    Args:
-        run_id: The ID of the run to retrieve
-
-    Returns:
-        JSON object with full run details
-    """
-    client = get_client()
-
-    try:
-        run = await client.get_run(run_id)
-        return json.dumps(run, indent=2, default=str)
-    except httpx.HTTPStatusError as e:
-        return json.dumps({
-            "error": f"Failed to get run: {e.response.status_code}",
-            "run_id": run_id,
-        }, indent=2)
-
-
-async def get_run_status(run_id: str) -> str:
-    """
-    Get the current status of a job run.
-
-    Use this tool to:
-    - Check if a run is still in progress
-    - See the current execution status
-    - Monitor long-running jobs
-
-    Args:
-        run_id: The ID of the run to check
-
-    Returns:
-        JSON object with run status information
-    """
-    client = get_client()
-
-    try:
-        status = await client.get_run_status(run_id)
-        return json.dumps(status, indent=2, default=str)
-    except httpx.HTTPStatusError as e:
-        return json.dumps({
-            "error": f"Failed to get run status: {e.response.status_code}",
-            "run_id": run_id,
-            "details": e.response.text if e.response.text else None,
-        }, indent=2)
-
-
 def _parse_results_to_node_map(results_data: Any) -> dict[str, dict]:
     """
     Normalize the run results API response into a flat {node_id: node_dict} map.
@@ -839,55 +784,6 @@ async def get_run_results(run_id: str) -> str:
     }, indent=2, default=str)
 
 
-async def get_job_details(run_id: str) -> str:
-    """
-    Get comprehensive details about a job run, combining status and results.
-
-    This is a convenience function that fetches both run status and results
-    in one call, providing a complete picture of the job execution.
-
-    Use this tool to:
-    - Investigate why a specific job failed
-    - Get all error messages and node-level status in one call
-    - Understand the full execution history of a run
-
-    Args:
-        run_id: The ID of the run to get details for
-
-    Returns:
-        JSON object with:
-        - run_id: The run identifier
-        - status: Current run status
-        - results: Node-level execution results
-        - errors: Extracted error information (if any failures)
-    """
-    client = get_client()
-
-    run_data, results_data = await asyncio.gather(
-        client.get_run(run_id),
-        client.get_run_results(run_id),
-        return_exceptions=True,
-    )
-    if isinstance(run_data, Exception):
-        run_data = None
-    if isinstance(results_data, Exception):
-        results_data = None
-
-    details: dict[str, Any] = {
-        "run_id": run_id,
-        "run": run_data,
-    }
-
-    if results_data:
-        node_map = _parse_results_to_node_map(results_data)
-        failed, _, _ = _classify_nodes(node_map)
-        if failed:
-            details["errors"] = [_format_failed_node(nid, n) for nid, n in failed]
-            details["error_count"] = len(failed)
-
-    return json.dumps(details, indent=2, default=str)
-
-
 async def investigate_failure(run_id: str) -> str:
     """
     Investigate a failed job run end-to-end in a single call.
@@ -1084,116 +980,6 @@ def _make_code_snippet(workspace_id: str, name_filter: str | None = None) -> str
     )
 
 
-async def list_workspace_nodes_tool(workspace_id: str, name_filter: str | None = None) -> str:
-    """
-    List development nodes in a workspace, with optional name filtering.
-
-    Use this tool to:
-    - Find a specific node by name when you already know the name from investigation context
-      (e.g. a failing node name returned by investigate_failure — pass it as name_filter)
-    - Audit workspace structure or inventory all nodes (omit name_filter)
-
-    When name_filter is provided: exhaustively searches all pages and returns only matching
-    nodes, keeping the response small. When omitted: returns the first page (up to 100 nodes).
-
-    The response includes a code_snippet field with ready-to-run Python that calls the
-    Coalesce API directly — execute it via mcp__ide__executeCode for targeted searches
-    without loading all results into context.
-
-    Args:
-        workspace_id: The workspace ID to list nodes from
-        name_filter: Optional partial node name to filter by (case-insensitive).
-            Pass this when you already know the node name you're looking for.
-
-    Returns:
-        JSON with matching node objects (id, name, nodeType, locationName, schema, database)
-        plus a code_snippet for direct API access.
-    """
-    client = get_client()
-    try:
-        result = await client.list_workspace_nodes(workspace_id, name_filter=name_filter)
-        nodes = result if isinstance(result, list) else result.get("data", [])
-        slim = [
-            {k: n[k] for k in ("id", "name", "nodeType", "locationName", "database", "schema") if k in n}
-            for n in nodes
-        ]
-        return json.dumps({
-            "nodes": slim,
-            "total": len(slim),
-            "filtered": bool(name_filter),
-            "code_snippet": _make_code_snippet(workspace_id, name_filter),
-            "code_hint": (
-                "Execute code_snippet via mcp__ide__executeCode to search nodes directly "
-                "via the Coalesce API — modify the filter condition as needed."
-            ),
-        }, default=str)
-    except httpx.HTTPStatusError as e:
-        return json.dumps({
-            "error": f"Failed to list workspace nodes: {e.response.status_code}",
-            "workspace_id": workspace_id,
-            "details": e.response.text if e.response.text else None,
-        }, indent=2)
-
-
-async def search_nodes_by_name_tool(
-    workspace_id: str,
-    node_name: str,
-    exact_match: bool = False,
-) -> str:
-    """
-    Find a workspace node by name and return its full configuration — in one call.
-
-    Use this tool when:
-    - You know the node name (or partial name) from investigation context and need its full config
-    - You want to skip the list_workspace_nodes → find UUID → get_workspace_node round-trip
-    - A failing node name was returned by investigate_failure and you want to inspect its SQL
-
-    This is the preferred tool for name-based node lookup. It exhaustively searches all
-    workspace nodes, resolves the UUID internally, and returns the full slimmed node config
-    in a single tool call.
-
-    The response includes a code_snippet for direct API access via mcp__ide__executeCode.
-
-    Args:
-        workspace_id: The workspace ID to search in
-        node_name: Node name to search for. Partial match by default (e.g. "GAME_DAY_BURST"
-            matches "STG_SBL_GAME_DAY_BURST_10_FILTER"). Set exact_match=true for exact.
-        exact_match: If true, requires exact name match (case-insensitive). Default false.
-
-    Returns:
-        JSON with full node configuration (slimmed) plus node_id and code_snippet.
-    """
-    client = get_client()
-    try:
-        result = await client.search_nodes_by_name(workspace_id, node_name, exact_match=exact_match)
-        if not result.get("found"):
-            return json.dumps({
-                "found": False,
-                "node_name": node_name,
-                "nodes_searched": result.get("searched", 0),
-                "hint": "Try a shorter partial name or check the workspace_id.",
-                "code_snippet": _make_code_snippet(workspace_id, node_name),
-            }, indent=2)
-
-        node_detail = result.get("node", {})
-        return json.dumps({
-            "found": True,
-            "node_id": result.get("node_id"),
-            "matches_found": result.get("matches_found", 1),
-            "node": _slim_node(node_detail),
-            "code_snippet": _make_code_snippet(workspace_id, node_name),
-            "code_hint": (
-                "Execute code_snippet via mcp__ide__executeCode to search nodes directly "
-                "via the Coalesce API without any MCP tool call."
-            ),
-        }, indent=2, default=str)
-    except httpx.HTTPStatusError as e:
-        return json.dumps({
-            "error": f"Failed to search workspace nodes: {e.response.status_code}",
-            "workspace_id": workspace_id,
-            "node_name": node_name,
-            "details": e.response.text if e.response.text else None,
-        }, indent=2)
 
 
 def _slim_node(node: dict) -> dict:
@@ -1253,33 +1039,89 @@ def _slim_node(node: dict) -> dict:
     }
 
 
-async def get_workspace_node_tool(workspace_id: str, node_id: str) -> str:
+async def get_workspace_node_tool(
+    workspace_id: str,
+    node_id: str | None = None,
+    node_name: str | None = None,
+    exact_match: bool = False,
+) -> str:
     """
-    Get details for a specific workspace node, focused on failure diagnosis.
+    Get full configuration for a workspace node — by node ID (direct) or by name (search).
 
-    Use this tool to:
-    - Understand a transformation's SQL logic and column expressions
-    - See upstream dependencies (what feeds this node)
-    - Inspect column transforms where SQL errors commonly live
-    - Check node config (materialization, warehouse settings)
+    If node_id is provided, fetches directly. If node_name is provided, exhaustively paginates
+    all workspace nodes to find a match, then fetches full details. If both are provided,
+    node_id takes precedence.
 
     Args:
-        workspace_id: The workspace ID containing the node
-        node_id: The node ID to retrieve
+        workspace_id: The workspace ID to fetch from or search in
+        node_id: Node UUID for direct fetch (fastest — use if you have it)
+        node_name: Partial or full node name to search for (case-insensitive)
+        exact_match: If true, requires exact name match. Default false (partial match).
 
     Returns:
-        JSON object with node name, type, config, column transforms, and source SQL.
-        Internal graph wiring and empty fields are omitted to reduce noise.
+        Slimmed node config: name, type, columns (with transforms), source mappings, config.
     """
     client = get_client()
+    http = await client._get_client()
+
     try:
-        result = await client.get_workspace_node(workspace_id, node_id)
-        return json.dumps(_slim_node(result), indent=2, default=str)
+        if node_id:
+            # Direct fetch by UUID
+            result = await client.get_workspace_node(workspace_id, node_id)
+            return json.dumps({
+                "node_id": node_id,
+                "node": _slim_node(result),
+            }, indent=2, default=str)
+
+        # Paginated name search
+        needle = node_name.lower()  # type: ignore[union-attr]
+        all_nodes: list[dict] = []
+        page_size = 500
+        offset = 0
+        while True:
+            resp = await http.get(
+                f"v1/workspaces/{workspace_id}/nodes",
+                params={"limit": page_size, "offset": offset},
+            )
+            resp.raise_for_status()
+            page = resp.json().get("data", []) if resp.content else []
+            all_nodes.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        if exact_match:
+            matches = [n for n in all_nodes if n.get("name", "").lower() == needle]
+        else:
+            matches = [n for n in all_nodes if needle in n.get("name", "").lower()]
+
+        if not matches:
+            return json.dumps({
+                "found": False,
+                "node_name": node_name,
+                "nodes_searched": len(all_nodes),
+                "hint": "Try a shorter partial name or check the workspace_id.",
+            }, indent=2)
+
+        match = matches[0]
+        matched_id = match.get("id")
+        detail_resp = await http.get(f"v1/workspaces/{workspace_id}/nodes/{matched_id}")
+        detail_resp.raise_for_status()
+        detail = detail_resp.json() if detail_resp.content else {}
+
+        return json.dumps({
+            "found": True,
+            "node_id": matched_id,
+            "matches_found": len(matches),
+            "node": _slim_node(detail),
+        }, indent=2, default=str)
+
     except httpx.HTTPStatusError as e:
         return json.dumps({
             "error": f"Failed to get workspace node: {e.response.status_code}",
             "workspace_id": workspace_id,
             "node_id": node_id,
+            "node_name": node_name,
             "details": e.response.text if e.response.text else None,
         }, indent=2)
 
@@ -1656,7 +1498,7 @@ async def start_run_tool(
         parallelism: Optional parallel execution level
 
     Returns:
-        JSON with run_id and initial status. Use get_run_status to poll progress.
+        JSON with run_id and initial status. Use investigate_failure to check results.
     """
     client = get_client()
     user_credentials = _build_user_credentials()
@@ -1669,7 +1511,7 @@ async def start_run_tool(
             "environment_id": environment_id,
             "job_id": job_id,
             "status": result.get("runStatus") or result.get("status"),
-            "note": "Run started. Use get_run_status to poll progress.",
+            "note": "Run started. Use investigate_failure with run_id to check results.",
             "raw": result,
         }, indent=2, default=str)
     except httpx.HTTPStatusError as e:
@@ -1692,7 +1534,7 @@ async def retry_run_tool(run_id: str) -> str:
         run_id: The run ID of the failed run to retry
 
     Returns:
-        JSON with new_run_id. Use get_run_status to poll progress.
+        JSON with new_run_id. Use investigate_failure to check results.
     """
     client = get_client()
     try:
@@ -1703,7 +1545,7 @@ async def retry_run_tool(run_id: str) -> str:
             "original_run_id": run_id,
             "new_run_id": new_run_id,
             "status": result.get("runStatus") or result.get("status"),
-            "note": "Retry started. Use get_run_status with new_run_id to poll progress.",
+            "note": "Retry started. Use investigate_failure with new_run_id to check results.",
             "raw": result,
         }, indent=2, default=str)
     except httpx.HTTPStatusError as e:
